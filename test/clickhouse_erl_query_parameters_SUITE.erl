@@ -139,11 +139,11 @@ test_missing_parameter_error(Config) ->
 
     Result = clickhouse_erl:query(Conn, Query, #{parameters => Parameters}),
 
-    ?assertMatch({error, {server_exception, #exception_info{}}}, Result),
+    ?assertMatch({error, {server_exception, #{code := _, message := _}}}, Result),
     {error, {server_exception, ExceptionInfo}} = Result,
 
     %% Verify the error message mentions the missing parameter
-    Message = ExceptionInfo#exception_info.message,
+    Message = maps:get(message, ExceptionInfo),
     ?assert(
         string:find(Message, <<"missing">>) =/= nomatch orelse
             string:find(Message, <<"Substitution">>) =/= nomatch

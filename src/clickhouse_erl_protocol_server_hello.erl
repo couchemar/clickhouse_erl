@@ -11,12 +11,12 @@
 %% @doc Decode a Server Hello message.
 %%
 %% Decodes according to ClickHouse protocol specification using feature detection.
--spec decode(binary()) -> {ok, server_hello_info()} | {error, term()}.
+-spec decode(binary()) -> {ok, server_hello_info(), binary()} | {error, term()}.
 decode(Binary) ->
     decode(Binary, ?PROTOCOL_VERSION).
 
 %% @doc Decode a Server Hello message with version-aware feature detection.
--spec decode(binary(), integer()) -> {ok, server_hello_info()} | {error, term()}.
+-spec decode(binary(), integer()) -> {ok, server_hello_info(), binary()} | {error, term()}.
 decode(Binary, ClientVersion) ->
     maybe
         {ok, Name, Rest1} ?= clickhouse_erl_types_primitive:decode_string(Binary),
@@ -29,8 +29,9 @@ decode(Binary, ClientVersion) ->
             version_minor => VersionMinor,
             revision => Revision
         },
-        {ok, FinalServerInfo} ?= decode_optional_fields(ServerInfo, Rest4, ClientVersion),
-        {ok, FinalServerInfo}
+        {ok, FinalServerInfo, FinalRest} ?=
+            decode_optional_fields(ServerInfo, Rest4, ClientVersion),
+        {ok, FinalServerInfo, FinalRest}
     else
         {error, Reason} -> {error, {decoding_error, Reason}}
     end.
@@ -41,9 +42,9 @@ decode_optional_fields(ServerInfo, Rest, ClientVersion) ->
     maybe
         {ok, ServerInfo1, Rest1} ?= decode_optional_timezone(ServerInfo, Rest, ClientVersion),
         {ok, ServerInfo2, Rest2} ?= decode_optional_display_name(ServerInfo1, Rest1, ClientVersion),
-        {ok, ServerInfo3, _Rest3} ?=
+        {ok, ServerInfo3, Rest3} ?=
             decode_optional_version_patch(ServerInfo2, Rest2, ClientVersion),
-        {ok, ServerInfo3}
+        {ok, ServerInfo3, Rest3}
     else
         {error, Reason} -> {error, Reason}
     end.

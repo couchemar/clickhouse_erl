@@ -117,7 +117,7 @@ encode_ipv4({A, B, C, D} = Tuple) when
 ->
     case validate_ipv4_octets(Tuple) of
         ok ->
-            {ok, <<A:8, B:8, C:8, D:8>>};
+            {ok, <<D:8, C:8, B:8, A:8>>};
         {error, Reason} ->
             {error, Reason}
     end;
@@ -129,7 +129,7 @@ encode_ipv4(Binary) when is_binary(Binary) ->
             {error, Reason}
     end;
 encode_ipv4(Integer) when is_integer(Integer), Integer >= 0, Integer =< 4294967295 ->
-    {ok, <<Integer:32/big>>};
+    {ok, <<Integer:32/little>>};
 encode_ipv4(Value) ->
     {error, {invalid_ipv4_format, Value}}.
 
@@ -138,7 +138,7 @@ encode_ipv4(Value) ->
 %% Returns {ok, {A, B, C, D}, Rest} where each octet is 0-255,
 %% or {error, Reason} if the binary is invalid.
 -spec decode_ipv4(binary()) -> {ok, ipv4_tuple(), binary()} | {error, term()}.
-decode_ipv4(<<A:8, B:8, C:8, D:8, Rest/binary>>) ->
+decode_ipv4(<<D:8, C:8, B:8, A:8, Rest/binary>>) ->
     {ok, {A, B, C, D}, Rest};
 decode_ipv4(Binary) when byte_size(Binary) < 4 ->
     {error,

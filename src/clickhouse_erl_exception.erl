@@ -25,7 +25,19 @@
 -export_type([exception_info/0]).
 
 %% @doc Format an exception into a human-readable binary.
--spec format(exception_info()) -> binary().
+-spec format(exception_info() | map()) -> binary().
+format(#{code := Code, name := Name, message := Message} = Info) ->
+    %% Map-based exception info (from event-driven parser)
+    StackTrace = maps:get(stack_trace, Info, <<>>),
+    BaseStr = format_exception_base(Code, Name, Message),
+    unicode:characters_to_binary([BaseStr, format_stack_trace_suffix(StackTrace)]);
+format(Info) when is_map(Info) ->
+    %% Map missing required fields — format what we have
+    Message = maps:get(message, Info, <<"unknown error">>),
+    StackTrace = maps:get(stack_trace, Info, <<>>),
+    unicode:characters_to_binary(
+        [<<"Exception: ">>, Message, format_stack_trace_suffix(StackTrace)]
+    );
 format(#exception_info{
     error_code = Code,
     exception_name = Name,
@@ -94,6 +106,11 @@ format_exception_base(Code, Name, Message) ->
     io_lib:format("~ts (~p) [~ts]: ~ts. ~ts", [
         Name, Code, atom_to_list(ErrAtom), Desc, Message
     ]).
+
+%% @doc Format stack trace as a suffix string for exception formatting.
+-spec format_stack_trace_suffix(binary()) -> binary().
+format_stack_trace_suffix(<<>>) -> <<>>;
+format_stack_trace_suffix(StackTrace) -> <<"\nStack trace:\n", StackTrace/binary>>.
 
 %% @doc Convert exception record to a map.
 -spec to_map(exception_info()) -> map().
@@ -213,6 +230,13 @@ find_by_name(Exception, TargetName) ->
 %% 47: UNKNOWN_IDENTIFIER
 %% 51: EMPTY_LIST_OF_COLUMNS_QUERIED
 %% 53: TYPE_MISMATCH
--spec is_schema_error(exception_info()) -> boolean().
+-spec is_schema_error(exception_info() | map()) -> boolean().
+is_schema_error(#{code := Code}) ->
+    is_schema_error_code(Code);
 is_schema_error(#exception_info{error_code = Code}) ->
+    is_schema_error_code(Code).
+
+%% @doc Check if an error code is a schema-related error code.
+-spec is_schema_error_code(integer()) -> boolean().
+is_schema_error_code(Code) ->
     lists:member(Code, [16, 47, 51, 53, 60, 81]).

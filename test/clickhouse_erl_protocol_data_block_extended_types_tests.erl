@@ -76,8 +76,8 @@ enum16_type_recognition_test() ->
 %%%===================================================================
 
 ipv4_type_recognition_test() ->
-    % Test that IPv4 type is recognized
-    Binary = <<192, 168, 1, 1>>,
+    % Test that IPv4 type is recognized (little-endian: {A,B,C,D} stored as <<D,C,B,A>>)
+    Binary = <<1, 1, 168, 192>>,
     Result = clickhouse_erl_protocol_data_block:decode_column_data(<<"IPv4">>, 1, Binary),
     ?assertMatch({ok, [{192, 168, 1, 1}], <<>>}, Result).
 

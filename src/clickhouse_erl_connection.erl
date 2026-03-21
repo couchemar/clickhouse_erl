@@ -482,10 +482,6 @@
     insert/2,
     cancel_query/1,
     cancel_query/2,
-    % Exported for testing
-    parse_packet_stream/2,
-    parse_packet_data/3,
-    is_truncated_data_error/1,
     % Callback validation (exported for testing)
     validate_callback/2,
     validate_prepared_request/1,
@@ -496,7 +492,13 @@
     % Version check for parameters (exported for testing)
     should_send_parameters/2,
     % Compression validation (exported for testing)
-    validate_and_normalize_compression_opts/1
+    validate_and_normalize_compression_opts/1,
+    % AccState initialization (exported for testing)
+    init_acc_state/1,
+    % Event processing (exported for testing)
+    process_events/2,
+    % Query result building (exported for testing)
+    build_query_result/1
 ]).
 
 %% gen_server callbacks
@@ -562,25 +564,11 @@
     | {server_exception, exception_info()}
     | exception_parsing_error().
 
-%% Connection state record
--record(connection_state, {
-    socket :: gen_tcp:socket() | undefined,
-    host :: string() | inet:ip_address(),
-    port :: inet:port_number(),
-    options :: connection_options(),
-    state :: connecting | ready | error,
-    server_info :: connection_info() | undefined,
-    error_reason :: connection_error() | undefined,
-    active_queries :: #{reference() => {pid(), term()}},
-    active_query_state :: active_query_state() | undefined,
-    negotiated_version :: non_neg_integer() | undefined,
-    buffer = <<>> :: binary(),
-    compression_opts :: clickhouse_erl_compression:compression_opts() | undefined
-}).
+%% Connection state record (shared with test files)
+-include("clickhouse_erl_connection.hrl").
 
 -type active_query_state() :: #{
     caller := {pid(), term()},
-    handler_state := clickhouse_erl_response_handler:handler_state(),
     query_id := binary(),
     timeout := timeout(),
     timer_ref := reference() | undefined,
@@ -595,7 +583,13 @@
     on_profile => function() | undefined,
     on_profile_events => function() | undefined,
     %% Compression options from connection state
-    compression_opts => clickhouse_erl_compression:compression_opts() | undefined
+    compression_opts => clickhouse_erl_compression:compression_opts() | undefined,
+    %% Event-driven parser state
+    parser_state => term() | undefined,
+    %% Current column name for streaming mode event dispatch
+    current_column_name => binary() | undefined,
+    %% Whether query was started with user-provided on_data callback
+    streaming_mode => boolean()
 }.
 
 -type state() :: #connection_state{}.
@@ -955,7 +949,6 @@ init({Host, Port, Options}) ->
                         active_queries = #{},
                         active_query_state = undefined,
                         negotiated_version = undefined,
-                        buffer = <<>>,
                         compression_opts = CompressionOpts
                     },
 
@@ -1143,100 +1136,63 @@ handle_info({query_timeout, QueryId}, State) ->
     end;
 handle_info({tcp, Socket, Data}, State) ->
     ?LOG_INFO("TCP data received: ~p bytes", [byte_size(Data)]),
-    ?LOG_DEBUG("Received data: ~p", [Data]),
+    ?LOG_INFO("Received data (first 20 bytes): ~s", [format_binary_for_log(Data)]),
+    ?LOG_DEBUG("Received data (full): ~p", [Data]),
     ?LOG_DEBUG("Active query state: ~p~n", [
         State#connection_state.active_query_state =/= undefined
     ]),
 
-    %% Prepend any buffered data to incoming data
-    Buffer = State#connection_state.buffer,
-    FullData =
-        case Buffer of
-            <<>> ->
-                ?LOG_DEBUG("No buffer, using incoming data only (~p bytes)~n", [byte_size(Data)]),
-                Data;
-            _ ->
-                ?LOG_DEBUG("Buffer prepend: ~p buffered bytes + ~p new bytes = ~p total bytes~n", [
-                    byte_size(Buffer), byte_size(Data), byte_size(Buffer) + byte_size(Data)
-                ]),
-                <<Buffer/binary, Data/binary>>
+    %% Get or initialize parser state
+    ParserState =
+        case State#connection_state.parser_state of
+            undefined ->
+                Version = State#connection_state.negotiated_version,
+                ?LOG_DEBUG("Initializing parser with version ~p~n", [Version]),
+                clickhouse_erl_parser:init(
+                    Version,
+                    State#connection_state.compression_opts
+                );
+            PS ->
+                ?LOG_DEBUG("Using existing parser state~n", []),
+                PS
         end,
 
-    %% Parse packet stream with combined data
-    case parse_packet_stream(FullData, State#connection_state{buffer = <<>>}) of
-        {ok, NewState, <<>>} ->
-            %% All packets parsed successfully, no remaining data
-            ?LOG_DEBUG("All packets handled successfully, no remaining data~n", []),
-            %% Reactivate socket if query is still active
-            case NewState#connection_state.active_query_state of
-                undefined ->
-                    %% Query completed, no need to reactivate
-                    ?LOG_DEBUG("Query completed, not reactivating socket~n", []),
-                    {noreply, NewState};
-                _ ->
-                    %% Query still active, reactivate socket for next packet
-                    ?LOG_DEBUG("Query still active, reactivating socket~n", []),
-                    case inet:setopts(Socket, [{active, once}]) of
-                        ok ->
-                            ?LOG_DEBUG("Socket reactivated successfully~n", []),
-                            {noreply, NewState};
-                        {error, SocketError} ->
-                            ?LOG_ERROR("Failed to reactivate socket: ~p~n", [SocketError]),
-                            ErrorState = NewState#connection_state{
-                                state = error,
-                                error_reason =
-                                    {network_error, {socket_reactivation_failed, SocketError}}
-                            },
-                            {noreply, ErrorState}
-                    end
-            end;
-        {ok, NewState, Rest} when byte_size(Rest) > 0 ->
-            %% Packets parsed but there's remaining data (shouldn't happen normally)
-            ?LOG_WARNING("Unexpected remaining data after parsing: ~p bytes~n", [byte_size(Rest)]),
-            %% Buffer the remaining data and reactivate
-            BufferedState = NewState#connection_state{buffer = Rest},
-            case BufferedState#connection_state.active_query_state of
-                undefined ->
-                    {noreply, BufferedState};
-                _ ->
-                    case inet:setopts(Socket, [{active, once}]) of
-                        ok ->
-                            {noreply, BufferedState};
-                        {error, SocketError} ->
-                            ErrorState = BufferedState#connection_state{
-                                state = error,
-                                error_reason =
-                                    {network_error, {socket_reactivation_failed, SocketError}}
-                            },
-                            {noreply, ErrorState}
-                    end
-            end;
-        {incomplete, UnparsedData, PartialState} ->
-            %% Incomplete packet, buffer and wait for more data
-            ?LOG_DEBUG(
-                "Incomplete packet detected: buffering ~p bytes, waiting for more data~n",
-                [byte_size(UnparsedData)]
-            ),
-            BufferedState = PartialState#connection_state{buffer = UnparsedData},
-            %% Reactivate socket to receive more data
-            case inet:setopts(Socket, [{active, once}]) of
-                ok ->
-                    ?LOG_DEBUG("Socket reactivated, waiting for more data~n", []),
-                    {noreply, BufferedState};
-                {error, SocketError} ->
-                    ?LOG_ERROR("Failed to reactivate socket: ~p~n", [SocketError]),
-                    ErrorState = BufferedState#connection_state{
-                        state = error,
-                        error_reason =
-                            {network_error, {socket_reactivation_failed, SocketError}},
-                        % Clear buffer on error
-                        buffer = <<>>
-                    },
-                    {noreply, ErrorState}
+    %% Parse with event-driven parser (parser manages buffer internally)
+    case clickhouse_erl_parser:parse(Data, ParserState) of
+        {ok, EventList, NewParserState} ->
+            ?LOG_DEBUG("Parser returned ~p events~n", [length(EventList)]),
+
+            %% Get or initialize accumulator state for event processing
+            %% Persist across TCP chunks so multi-packet results accumulate correctly.
+            %% An initialized AccState always has the 'columns' key (set by init_acc_state).
+            %% A raw user initial_accumulator (e.g. #{}) won't have it, so we can
+            %% distinguish "already initialized" from "needs initialization".
+            AccState =
+                case State#connection_state.active_query_state of
+                    #{accumulator := PrevAcc} when is_map(PrevAcc), is_map_key(columns, PrevAcc) ->
+                        PrevAcc;
+                    InitAQS when is_map(InitAQS) ->
+                        init_acc_state(InitAQS);
+                    _ ->
+                        init_acc_state(#{})
+                end,
+
+            %% Process events in a single pass
+            %% 4-tuple: {HasEndOfStream, NeedMore, HasException, AccState}
+            case process_events(EventList, AccState) of
+                {callback_error, CallbackReason} ->
+                    %% Callback failed - reply with error and clean up
+                    NewState = State#connection_state{parser_state = NewParserState},
+                    complete_query(NewState, {error, {callback_failed, CallbackReason}});
+                {HasEndOfStream, _NeedMore, _HasException, NewAccState} ->
+                    handle_parsed_events(
+                        HasEndOfStream, NewAccState, NewParserState, State, Socket
+                    )
             end;
         {error, Reason} ->
-            %% Protocol error, fail query and clear buffer
-            ?LOG_ERROR("Error handling incoming packet: ~p~n", [Reason]),
+            %% Protocol error, fail query
+            FormattedReason = format_error_for_log(Reason),
+            ?LOG_ERROR("Parser error: ~p~n", [FormattedReason]),
 
             %% Notify active query if any
             case State#connection_state.active_query_state of
@@ -1250,9 +1206,8 @@ handle_info({tcp, Socket, Data}, State) ->
             ErrorState = State#connection_state{
                 state = error,
                 error_reason = Reason,
-                % Clear buffer on error
-                buffer = <<>>,
-                active_query_state = undefined
+                active_query_state = undefined,
+                parser_state = undefined
             },
             {noreply, ErrorState}
     end;
@@ -1534,7 +1489,6 @@ execute_insert(State, PreparedRequest, From) ->
 %% @doc Build common ActiveQueryState map for both query and INSERT operations
 -spec build_active_query_state(
     From,
-    HandlerState,
     QueryId,
     Timeout,
     TimerRef,
@@ -1543,7 +1497,6 @@ execute_insert(State, PreparedRequest, From) ->
     CompressionOpts
 ) -> ActiveQueryState when
     From :: {pid(), term()},
-    HandlerState :: term(),
     QueryId :: binary(),
     Timeout :: timeout(),
     TimerRef :: reference() | undefined,
@@ -1553,7 +1506,6 @@ execute_insert(State, PreparedRequest, From) ->
     ActiveQueryState :: map().
 build_active_query_state(
     From,
-    HandlerState,
     QueryId,
     Timeout,
     TimerRef,
@@ -1561,34 +1513,40 @@ build_active_query_state(
     PreparedRequest,
     CompressionOpts
 ) ->
-    OnData = maps:get(on_data, PreparedRequest, get_default_on_data_callback()),
     OnProgress = maps:get(on_progress, PreparedRequest, fun(_) -> ok end),
     OnProfile = maps:get(on_profile, PreparedRequest, fun(_) -> ok end),
     OnProfileEvents = maps:get(on_profile_events, PreparedRequest, fun(_) -> ok end),
-    #{
+    StreamingMode = maps:is_key(on_data, PreparedRequest),
+    Base = #{
         caller => From,
-        handler_state => HandlerState,
         query_id => QueryId,
         timeout => Timeout,
         timer_ref => TimerRef,
         cancelled => false,
         replied => false,
-        %% Streaming callbacks (always set, never undefined)
-        on_data => OnData,
         accumulator => InitialAccumulator,
         on_progress => OnProgress,
         on_profile => OnProfile,
         on_profile_events => OnProfileEvents,
         %% Compression options from connection state
-        compression_opts => CompressionOpts
-    }.
+        compression_opts => CompressionOpts,
+        %% Whether user provided on_data callback (true = streaming, false = batch)
+        streaming_mode => StreamingMode
+    },
+    %% Only include on_data when user provides a callback (streaming mode).
+    %% Batch mode uses the existing column accumulation path — no callback needed.
+    case maps:find(on_data, PreparedRequest) of
+        {ok, OnData} ->
+            Base#{on_data => OnData};
+        error ->
+            Base
+    end.
 
 %% @doc Create ActiveQueryState with proper InitialAccumulator handling
 %% This helper encapsulates the common pattern of determining InitialAccumulator
 %% and building ActiveQueryState, used by both query and insert operations.
 -spec create_active_query_state(
     From,
-    HandlerState,
     QueryId,
     Timeout,
     TimerRef,
@@ -1596,7 +1554,6 @@ build_active_query_state(
     CompressionOpts
 ) -> ActiveQueryState when
     From :: {pid(), term()},
-    HandlerState :: term(),
     QueryId :: binary(),
     Timeout :: timeout(),
     TimerRef :: reference() | undefined,
@@ -1604,7 +1561,7 @@ build_active_query_state(
     CompressionOpts :: clickhouse_erl_compression:compression_opts() | undefined,
     ActiveQueryState :: map().
 create_active_query_state(
-    From, HandlerState, QueryId, Timeout, TimerRef, PreparedRequest, CompressionOpts
+    From, QueryId, Timeout, TimerRef, PreparedRequest, CompressionOpts
 ) ->
     %% Determine InitialAccumulator based on query mode
     InitialAccumulator =
@@ -1628,7 +1585,6 @@ create_active_query_state(
     %% Build and return ActiveQueryState
     build_active_query_state(
         From,
-        HandlerState,
         QueryId,
         Timeout,
         TimerRef,
@@ -1645,33 +1601,68 @@ send_ping(Socket) ->
         {error, Error} -> {error, {network_error, Error}}
     end.
 
-%% @doc Receive server pong (4) packet
--spec receive_server_pong(Socket) -> ok | {error, Reason} when
+%% @doc Receive SERVER_PONG using event-driven parser (POC)
+%% This is a proof-of-concept integration of clickhouse_erl_parser for PONG packets.
+%% Pattern can be expanded to other packet types once validated.
+-spec receive_server_pong_with_parser(Socket, Version) -> ok | {error, Reason} when
     Socket :: gen_tcp:socket(),
+    Version :: non_neg_integer(),
     Reason :: connection_error().
-receive_server_pong(Socket) ->
-    % Set socket to active mode to receive data
+receive_server_pong_with_parser(Socket, Version) ->
+    %% Initialize event-driven parser
+    ParserState = clickhouse_erl_parser:init(Version),
+
+    %% Set socket to active mode
     case inet:setopts(Socket, [{active, once}]) of
         ok ->
-            % Wait for server pong (4) response with timeout
-            receive
-                {tcp, Socket, <<4:8>>} ->
-                    % Server pong received successfully
-                    % Set socket back to passive mode
-                    case inet:setopts(Socket, [{active, false}]) of
-                        ok -> ok;
-                        {error, SocketError} -> {error, {network_error, SocketError}}
-                    end;
-                {tcp_closed, Socket} ->
-                    {error, {network_error, connection_closed_during_ping}};
-                {tcp_error, Socket, Reason} ->
-                    {error, {network_error, {tcp_error_during_ping, Reason}}}
-            after ?HANDSHAKE_TIMEOUT ->
-                inet:setopts(Socket, [{active, false}]),
-                {error, {timeout_error, ping_receive}}
-            end;
+            receive_pong_data(Socket, ParserState);
         {error, SocketError} ->
             {error, {network_error, {socket_option_error, SocketError}}}
+    end.
+
+%% @doc Wait for and parse PONG response data from socket.
+-spec receive_pong_data(gen_tcp:socket(), map()) -> ok | {error, connection_error()}.
+receive_pong_data(Socket, ParserState) ->
+    receive
+        {tcp, Socket, Data} ->
+            handle_pong_tcp_data(Socket, Data, ParserState);
+        {tcp_closed, Socket} ->
+            {error, {network_error, connection_closed_during_ping}};
+        {tcp_error, Socket, Reason} ->
+            {error, {network_error, {tcp_error_during_ping, Reason}}}
+    after ?HANDSHAKE_TIMEOUT ->
+        inet:setopts(Socket, [{active, false}]),
+        {error, {timeout_error, pong_receive}}
+    end.
+
+%% @doc Parse TCP data for PONG response and verify events.
+-spec handle_pong_tcp_data(gen_tcp:socket(), binary(), map()) ->
+    ok | {error, connection_error()}.
+handle_pong_tcp_data(Socket, Data, ParserState) ->
+    case clickhouse_erl_parser:parse(Data, ParserState) of
+        {ok, Events, _NewParserState} when is_list(Events) ->
+            inet:setopts(Socket, [{active, false}]),
+            verify_pong_events(Events);
+        {error, Reason} ->
+            inet:setopts(Socket, [{active, false}]),
+            {error, {protocol_error, Reason}}
+    end.
+
+%% @doc Verify PONG events from event-driven parser
+-spec verify_pong_events(Events) -> ok | {error, Reason} when
+    Events :: list(),
+    Reason :: term().
+verify_pong_events(Events) ->
+    %% Expected: [{start, server_pong}, {'end', server_pong}]
+    %% or [{start, server_pong}, {'end', server_pong}, need_more] if buffer has leftover
+    case Events of
+        [{start, server_pong}, {'end', server_pong}] ->
+            ok;
+        [{start, server_pong}, {'end', server_pong}, need_more] ->
+            %% PONG complete, need_more indicates parser ready for next packet
+            ok;
+        _Other ->
+            {error, {unexpected_pong_events, Events}}
     end.
 
 %% @doc Send the actual query packet after settings are configured
@@ -1723,6 +1714,9 @@ send_query_packet(State, PreparedRequest, From, Timeout) ->
         {ok, PacketData} ?=
             clickhouse_erl_protocol_query_packet:encode(QueryInfo, NegotiatedVersion),
         ?LOG_DEBUG("Encoded query packet, size: ~p bytes~n", [byte_size(PacketData)]),
+        ?LOG_INFO("Query packet (first 50 bytes): ~s~n", [
+            format_binary_for_log(binary:part(PacketData, 0, min(50, byte_size(PacketData))))
+        ]),
         ?LOG_DEBUG("Full packet: ~p~n", [PacketData]),
         %% CRITICAL: Set socket to active mode BEFORE sending query
         %% This prevents race condition where response arrives before we're listening
@@ -1742,13 +1736,11 @@ send_query_packet(State, PreparedRequest, From, Timeout) ->
         ok ?= gen_tcp:send(Socket, BlankBlock),
         ?LOG_DEBUG("Blank data block sent successfully~n", []),
         %% Initialize response handler state
-        HandlerState = clickhouse_erl_response_handler:create_initial_state(),
         %% Start timeout timer if timeout is not infinity
         TimerRef = create_timeout_timer(Timeout, QueryId),
         %% Build ActiveQueryState using helper function
         ActiveQueryState = create_active_query_state(
             From,
-            HandlerState,
             QueryId,
             Timeout,
             TimerRef,
@@ -2025,26 +2017,6 @@ encode_blank_data_block(CompressionOpts) ->
     %% Assemble packet: PacketType + TempTableName (uncompressed) + BlockData (compressed)
     iolist_to_binary([PacketType, TempTableName, CompressedBlockData]).
 
-%% @doc Propagate server exception to all active queries
--spec propagate_exception_to_queries(ServerException, State) -> NewState when
-    ServerException :: {server_exception, exception_info()},
-    State :: state(),
-    NewState :: state().
-propagate_exception_to_queries(ServerException, State) ->
-    ActiveQueries = State#connection_state.active_queries,
-
-    % Reply to all active queries with the server exception
-    maps:fold(
-        fun(_QueryRef, From, _Acc) ->
-            gen_server:reply(From, {error, ServerException})
-        end,
-        ok,
-        ActiveQueries
-    ),
-
-    % Clear active queries since they've all been replied to
-    State#connection_state{active_queries = #{}}.
-
 %% @doc Establish TCP connection to ClickHouse server
 -spec establish_tcp_connection(State) -> {ok, NewState} | {error, Reason} when
     State :: state(),
@@ -2156,7 +2128,7 @@ perform_handshake(State) ->
         % Send addendum (quota key) if supported by protocol version
         ok ?= send_addendum(Socket, NegotiatedVersion),
         ok ?= send_ping(Socket),
-        ok ?= receive_server_pong(Socket),
+        ok ?= receive_server_pong_with_parser(Socket, NegotiatedVersion),
         % Update connection state to ready with negotiated version
         NewState = State#connection_state{
             state = ready,
@@ -2227,104 +2199,150 @@ send_client_hello(Socket, ClientHelloInfo) ->
             {error, EncodingError}
     end.
 
-%% @doc Receive and parse Server_Hello response
+%% @doc Receive and parse Server_Hello response using event-driven parser
 -spec receive_server_hello(Socket) -> {ok, ServerInfo} | {error, Reason} when
     Socket :: gen_tcp:socket(),
     ServerInfo :: connection_info(),
     Reason :: connection_error().
 receive_server_hello(Socket) ->
+    % Initialize parser state
+    ParserState = clickhouse_erl_parser:init(?PROTOCOL_VERSION),
     % Set socket to active mode to receive data
     case inet:setopts(Socket, [{active, once}]) of
         ok ->
-            % Wait for Server_Hello response with timeout
-            receive
-                {tcp, Socket, Data} ->
-                    % Parse the received data and set socket back to passive mode
-                    maybe
-                        {ok, ServerInfo} ?= parse_server_hello_packet(Data),
-                        ?LOG_DEBUG("Handshake successful. ServerInfo: ~p~n", [ServerInfo]),
-                        ok ?= inet:setopts(Socket, [{active, false}]),
-                        {ok, ServerInfo}
-                    else
-                        {error, Reason} ->
-                            inet:setopts(Socket, [{active, false}]),
-                            {error, Reason}
-                    end;
-                {tcp_closed, Socket} ->
-                    {error, {network_error, connection_closed_during_handshake}};
-                {tcp_error, Socket, Reason} ->
-                    {error, {network_error, {tcp_error_during_handshake, Reason}}}
-            after ?HANDSHAKE_TIMEOUT ->
-                inet:setopts(Socket, [{active, false}]),
-                {error, {timeout_error, handshake_receive}}
-            end;
+            receive_server_hello_loop(Socket, ParserState, #{});
         {error, SocketError} ->
             {error, {network_error, {socket_option_error, SocketError}}}
     end.
 
-%% @doc Parse Server_Hello response data
--spec parse_server_hello_packet(Data) -> {ok, ServerInfo} | {error, Reason} when
-    Data :: binary(),
+%% @doc Loop to receive and parse Server_Hello using event-driven parser
+-spec receive_server_hello_loop(Socket, ParserState, ServerInfo) ->
+    {ok, ServerInfo} | {error, Reason}
+when
+    Socket :: gen_tcp:socket(),
+    ParserState :: map(),
     ServerInfo :: connection_info(),
     Reason :: connection_error().
-parse_server_hello_packet(<<PacketType:8, MessageData/binary>>) ->
-    % Log the raw response data for debugging
-    ?LOG_DEBUG("Received response packet~n", []),
-    ?LOG_DEBUG("Raw data: ~p~n", [<<PacketType:8, MessageData/binary>>]),
-    ?LOG_DEBUG("Packet type: ~p~n", [PacketType]),
-    ?LOG_DEBUG("Message data length: ~p~n", [byte_size(MessageData)]),
-
-    case PacketType of
-        ?SERVER_HELLO ->
-            ?LOG_DEBUG("Processing Server_Hello packet~n"),
-            ?LOG_DEBUG("First 20 bytes of message data: ~p~n", [
-                binary:part(MessageData, 0, min(20, byte_size(MessageData)))
-            ]),
-
-            case clickhouse_erl_protocol:decode_server_hello(MessageData, ?PROTOCOL_VERSION) of
-                {ok, ServerHelloInfo} ->
-                    % Convert to connection_info format
-                    ServerInfo = #{
-                        server_name => maps:get(name, ServerHelloInfo),
-                        server_version => {
-                            maps:get(version_major, ServerHelloInfo),
-                            maps:get(version_minor, ServerHelloInfo),
-                            maps:get(version_patch, ServerHelloInfo, 0)
-                        },
-                        server_revision => maps:get(revision, ServerHelloInfo),
-                        server_timezone => maps:get(timezone, ServerHelloInfo, <<"UTC">>),
-                        server_display_name => maps:get(display_name, ServerHelloInfo, <<>>)
-                    },
-                    {ok, ServerInfo};
+receive_server_hello_loop(Socket, ParserState, ServerInfo) ->
+    receive
+        {tcp, Socket, Data} ->
+            % Parse the received data
+            case clickhouse_erl_parser:parse(Data, ParserState) of
+                {ok, Events, NewParserState} ->
+                    % Process events to extract server info
+                    case process_server_hello_events(Events, ServerInfo) of
+                        {complete, FinalServerInfo} ->
+                            % Server_Hello complete
+                            inet:setopts(Socket, [{active, false}]),
+                            ?LOG_DEBUG("Handshake successful. ServerInfo: ~p~n", [FinalServerInfo]),
+                            {ok, FinalServerInfo};
+                        {continue, UpdatedServerInfo} ->
+                            % Need more data
+                            inet:setopts(Socket, [{active, once}]),
+                            receive_server_hello_loop(Socket, NewParserState, UpdatedServerInfo);
+                        {error, Reason} ->
+                            inet:setopts(Socket, [{active, false}]),
+                            {error, Reason}
+                    end;
                 {error, Reason} ->
-                    {error, Reason}
+                    inet:setopts(Socket, [{active, false}]),
+                    {error, {protocol_error, Reason}}
             end;
-        ?SERVER_EXCEPTION ->
-            ?LOG_DEBUG("Processing Exception packet during handshake~n"),
-            ?LOG_DEBUG("First 20 bytes of exception data: ~p~n", [
-                binary:part(MessageData, 0, min(20, byte_size(MessageData)))
-            ]),
+        {tcp_closed, Socket} ->
+            {error, {network_error, connection_closed_during_handshake}};
+        {tcp_error, Socket, Reason} ->
+            {error, {network_error, {tcp_error_during_handshake, Reason}}}
+    after ?HANDSHAKE_TIMEOUT ->
+        inet:setopts(Socket, [{active, false}]),
+        {error, {timeout_error, handshake_receive}}
+    end.
 
-            case clickhouse_erl_protocol:decode_exception_packet(MessageData) of
-                {ok, ExceptionInfo, _Rest} ->
-                    % Exception during handshake - return as server exception error
-                    ?LOG_DEBUG("Exception parsed successfully: ~p~n", [ExceptionInfo]),
-                    {error, {server_exception, ExceptionInfo}};
-                {error, ParseError} ->
-                    % Failed to parse exception packet
-                    ?LOG_DEBUG("Failed to parse exception packet: ~p~n", [ParseError]),
-                    {error, ParseError}
-            end;
+%% @doc Process server_hello events and extract server info
+-spec process_server_hello_events(Events, ServerInfo) ->
+    {complete, ServerInfo} | {continue, ServerInfo} | {error, Reason}
+when
+    Events :: list(),
+    ServerInfo :: connection_info(),
+    Reason :: connection_error().
+process_server_hello_events(Events, ServerInfo) ->
+    process_server_hello_events(Events, ServerInfo, false).
+
+process_server_hello_events([], ServerInfo, true) ->
+    % Completed server_hello
+    {complete, ServerInfo};
+process_server_hello_events([], ServerInfo, false) ->
+    % Need more data
+    {continue, ServerInfo};
+process_server_hello_events([Event | Rest], ServerInfo, Completed) ->
+    case Event of
+        {start, server_hello} ->
+            process_server_hello_events(Rest, ServerInfo, Completed);
+        {data, name, Name} ->
+            process_server_hello_events(Rest, ServerInfo#{server_name => Name}, Completed);
+        {data, version_major, Major} ->
+            process_server_hello_events(Rest, ServerInfo#{version_major => Major}, Completed);
+        {data, version_minor, Minor} ->
+            process_server_hello_events(Rest, ServerInfo#{version_minor => Minor}, Completed);
+        {data, version_patch, Patch} ->
+            process_server_hello_events(Rest, ServerInfo#{version_patch => Patch}, Completed);
+        {data, revision, Revision} ->
+            process_server_hello_events(Rest, ServerInfo#{server_revision => Revision}, Completed);
+        {data, timezone, Timezone} ->
+            process_server_hello_events(Rest, ServerInfo#{server_timezone => Timezone}, Completed);
+        {data, display_name, DisplayName} ->
+            process_server_hello_events(
+                Rest, ServerInfo#{server_display_name => DisplayName}, Completed
+            );
+        {'end', server_hello} ->
+            % Build final server info
+            FinalServerInfo = #{
+                server_name => maps:get(server_name, ServerInfo, <<>>),
+                server_version => {
+                    maps:get(version_major, ServerInfo, 0),
+                    maps:get(version_minor, ServerInfo, 0),
+                    maps:get(version_patch, ServerInfo, 0)
+                },
+                server_revision => maps:get(server_revision, ServerInfo, 0),
+                server_timezone => maps:get(server_timezone, ServerInfo, <<"UTC">>),
+                server_display_name => maps:get(server_display_name, ServerInfo, <<>>)
+            },
+            process_server_hello_events(Rest, FinalServerInfo, true);
+        {start, server_exception} ->
+            % Exception during handshake - collect exception info
+            collect_exception_info(Rest);
+        need_more ->
+            process_server_hello_events(Rest, ServerInfo, Completed);
         _ ->
-            ?LOG_DEBUG("Unknown packet type: ~p~n", [PacketType]),
-            {error, {protocol_error, io_lib:format("Unexpected packet type: ~p", [PacketType])}}
-    end;
-parse_server_hello_packet(Data) ->
-    % Log the raw response data for debugging when it doesn't match expected format
-    ?LOG_DEBUG("Invalid response format~n"),
-    ?LOG_DEBUG("Raw data: ~p~n", [Data]),
-    ?LOG_DEBUG("Data length: ~p~n", [byte_size(Data)]),
-    {error, {protocol_error, "Invalid response format"}}.
+            % Unexpected event
+            {error, {protocol_error, {unexpected_event, Event}}}
+    end.
+
+%% @doc Collect exception info from events
+-spec collect_exception_info(Events) -> {error, Reason} when
+    Events :: list(),
+    Reason :: connection_error().
+collect_exception_info(Events) ->
+    collect_exception_info(Events, #{}).
+
+collect_exception_info([], ExceptionInfo) ->
+    {error, {server_exception, ExceptionInfo}};
+collect_exception_info([Event | Rest], ExceptionInfo) ->
+    case Event of
+        {data, error_code, Code} ->
+            collect_exception_info(Rest, ExceptionInfo#{code => Code});
+        {data, exception_name, Name} ->
+            collect_exception_info(Rest, ExceptionInfo#{name => Name});
+        {data, message, Message} ->
+            collect_exception_info(Rest, ExceptionInfo#{message => Message});
+        {data, stack_trace, StackTrace} ->
+            collect_exception_info(Rest, ExceptionInfo#{stack_trace => StackTrace});
+        {data, nested, Nested} ->
+            collect_exception_info(Rest, ExceptionInfo#{nested => Nested});
+        {'end', server_exception} ->
+            {error, {server_exception, ExceptionInfo}};
+        _ ->
+            collect_exception_info(Rest, ExceptionInfo)
+    end.
 
 %% @doc Check protocol version compatibility with server
 -spec check_protocol_compatibility(ServerInfo) -> ok | {error, Reason} when
@@ -2361,26 +2379,6 @@ cleanup_resources(State) ->
         _:CloseError ->
             Details = io_lib:format("Failed to close socket: ~p", [CloseError]),
             {error, {resource_cleanup_error, lists:flatten(Details)}}
-    end.
-
-packet_type_name(PacketType) ->
-    case PacketType of
-        0 -> "SERVER_HELLO";
-        1 -> "SERVER_DATA";
-        2 -> "SERVER_EXCEPTION";
-        3 -> "SERVER_PROGRESS";
-        4 -> "SERVER_PONG";
-        5 -> "SERVER_END_OF_STREAM";
-        6 -> "SERVER_PROFILE";
-        7 -> "SERVER_TOTALS";
-        8 -> "SERVER_EXTREMES";
-        9 -> "SERVER_TABLES_STATUS";
-        10 -> "SERVER_LOG";
-        11 -> "SERVER_TABLE_COLUMNS";
-        12 -> "SERVER_PART_UUIDS";
-        13 -> "SERVER_READ_TASK_REQUEST";
-        14 -> "SERVER_PROFILE_EVENTS";
-        _ -> "UNKNOWN"
     end.
 
 %% @doc Send INSERT packet sequence (Query + Data + Blank)
@@ -2550,20 +2548,12 @@ execute_insert_with_validated_params(
         BlankBlockAfterData = encode_blank_data_block(State#connection_state.compression_opts),
         ok ?= gen_tcp:send(Socket, BlankBlockAfterData),
         ?LOG_DEBUG("Final blank data block sent successfully~n", []),
-        %% Step 7: Initialize response handler state
-        HandlerState0 =
-            clickhouse_erl_response_handler:create_initial_state(
-                NegotiatedVersion, insert
-            ),
-        %% Add rows_to_insert to handler state for INSERT result reporting
-        HandlerState = HandlerState0#{rows_to_insert => NumRows},
-        %% Step 8: Start timeout timer
+        %% Step 7: Start timeout timer
         TimerRef = create_timeout_timer(Timeout, QueryId),
-        %% Step 9: Update connection state
+        %% Step 8: Update connection state
         %% Build ActiveQueryState using helper function and add INSERT-specific fields
         ActiveQueryState0 = create_active_query_state(
             From,
-            HandlerState,
             QueryId,
             Timeout,
             TimerRef,
@@ -2588,371 +2578,90 @@ execute_insert_with_validated_params(
             {error, {network_error, Reason}}
     end.
 
-%% @doc Parse packet stream, handling multiple packets and incomplete data
-%% This function implements the core TCP stream parsing logic for ClickHouse packets.
-%% It handles three scenarios:
-%% 1. Empty data - returns {ok, State, <<>>}
-%% 2. Complete packet(s) - parses and continues with remainder
-%% 3. Incomplete packet - returns {incomplete, UnparsedData, State}
-%%
-%% Requirements: REQ-1.1, REQ-1.2, REQ-1.3, REQ-2.2
--spec parse_packet_stream(Data, State) ->
-    {ok, NewState, Rest}
-    | {incomplete, UnparsedData, PartialState}
-    | {error, Reason}
+%% @doc Complete an active query by cancelling its timer, replying, and clearing state.
+%% Returns {noreply, NewState} for use in handle_info/handle_cast.
+-spec complete_query(state(), Reply) ->
+    {noreply, state()}
 when
-    Data :: binary(),
-    State :: state(),
-    NewState :: state(),
-    Rest :: binary(),
-    UnparsedData :: binary(),
-    PartialState :: state(),
-    Reason :: connection_error().
-
-%% Handle empty data - no more packets to parse
-parse_packet_stream(<<>>, State) ->
-    ActiveQueryDefined = State#connection_state.active_query_state =/= undefined,
-    ?LOG_DEBUG("parse_packet_stream: empty data, no more packets to parse, active_query=~p~n", [
-        ActiveQueryDefined
-    ]),
-    {ok, State, <<>>};
-%% Handle complete packet - have packet type byte
-parse_packet_stream(<<PacketType:8, Rest/binary>>, State) ->
-    ?LOG_DEBUG("parse_packet_stream: parsing packet type ~p [~s], ~p bytes remaining~n", [
-        PacketType, packet_type_name(PacketType), byte_size(Rest)
-    ]),
-
-    %% Try to parse the packet data
-    case parse_packet_data(PacketType, Rest, State) of
-        {ok, NewState, Remainder} ->
-            %% Packet parsed successfully, continue with remainder (tail-recursive)
-            ActiveQueryDefined = NewState#connection_state.active_query_state =/= undefined,
-            ?LOG_DEBUG(
-                "parse_packet_stream: packet ~p [~s] parsed successfully, "
-                "~p bytes remaining, active_query=~p~n",
-                [
-                    PacketType,
-                    packet_type_name(PacketType),
-                    byte_size(Remainder),
-                    ActiveQueryDefined
-                ]
-            ),
-            parse_packet_stream(Remainder, NewState);
-        {incomplete, _Reason} ->
-            %% Not enough data for this packet, buffer from packet type
-            BufferSize = byte_size(<<PacketType:8, Rest/binary>>),
-            ?LOG_DEBUG(
-                "parse_packet_stream: incomplete packet, buffering ~p bytes~n",
-                [BufferSize]
-            ),
-            {incomplete, <<PacketType:8, Rest/binary>>, State};
-        {error, Reason} ->
-            ?LOG_DEBUG("parse_packet_stream: error parsing packet: ~p~n", [Reason]),
-            {error, Reason}
-    end;
-%% Handle incomplete header - less than 1 byte available
-parse_packet_stream(Data, State) when byte_size(Data) > 0 ->
-    ?LOG_DEBUG(
-        "parse_packet_stream: incomplete header, buffering ~p bytes (cannot read packet type)~n",
-        [byte_size(Data)]
-    ),
-    %% Can't read packet type yet, buffer all data
-    {incomplete, Data, State}.
-
-%% @doc Parse packet data based on packet type
-%% Dispatches to specific packet handlers and detects incomplete packets
-%%
-%% Requirements: REQ-2.1, REQ-4.1, REQ-4.2
--spec parse_packet_data(PacketType, Data, State) ->
-    {ok, NewState, Rest} | {incomplete, Reason} | {error, Reason}
-when
-    PacketType :: integer(),
-    Data :: binary(),
-    State :: state(),
-    NewState :: state(),
-    Rest :: binary(),
-    Reason :: term().
-parse_packet_data(PacketType, Data, State) ->
-    ?LOG_DEBUG("parse_packet_data: dispatching packet type ~p [~s], ~p bytes available~n", [
-        PacketType, packet_type_name(PacketType), byte_size(Data)
-    ]),
-
-    %% Check if we have an active query
+    Reply :: {ok, term()} | {error, term()}.
+complete_query(State, Reply) ->
     case State#connection_state.active_query_state of
         undefined ->
-            %% No active query - only handle exceptions
-            case PacketType of
-                ?SERVER_EXCEPTION ->
-                    parse_exception_packet_data(Data, State);
-                _ ->
-                    ?LOG_WARNING("Received packet type ~p with no active query~n", [
-                        PacketType
-                    ]),
-                    {error, {protocol_error, "Received packet with no active query"}}
-            end;
-        ActiveQueryState ->
-            %% Have active query - delegate to query packet handler
-            parse_query_packet_data(PacketType, Data, ActiveQueryState, State)
-    end.
-
-%% @doc Parse exception packet data
--spec parse_exception_packet_data(Data, State) ->
-    {ok, NewState, Rest} | {incomplete, Reason} | {error, Reason}
-when
-    Data :: binary(),
-    State :: state(),
-    NewState :: state(),
-    Rest :: binary(),
-    Reason :: term().
-parse_exception_packet_data(Data, State) ->
-    case clickhouse_erl_protocol:decode_exception_packet(Data) of
-        {ok, ExceptionInfo, Rest} ->
-            %% Exception parsed successfully
-            ServerException = {server_exception, ExceptionInfo},
-            NewState = propagate_exception_to_queries(ServerException, State),
-            {ok, NewState, Rest};
-        {error, Reason} ->
-            %% Protocol error during exception parsing
-            {error, Reason}
-    end.
-
-%% @doc Parse query packet data (delegates to response handler)
--spec parse_query_packet_data(PacketType, Data, ActiveQueryState, State) ->
-    {ok, NewState, Rest} | {incomplete, Reason} | {error, Reason}
-when
-    PacketType :: integer(),
-    Data :: binary(),
-    ActiveQueryState :: active_query_state(),
-    State :: state(),
-    NewState :: state(),
-    Rest :: binary(),
-    Reason :: term().
-parse_query_packet_data(PacketType, Data, ActiveQueryState, State) ->
-    IsCancelled = maps:get(cancelled, ActiveQueryState, false),
-    HandlerResult = route_packet_to_handler(PacketType, Data, ActiveQueryState, State),
-    process_handler_result(HandlerResult, IsCancelled, ActiveQueryState, State).
-
-%% @doc Route packet to appropriate handler based on packet type
--spec route_packet_to_handler(PacketType, Data, ActiveQueryState, State) -> HandlerResult when
-    PacketType :: integer(),
-    Data :: binary(),
-    ActiveQueryState :: active_query_state(),
-    State :: state(),
-    HandlerResult ::
-        {data_updated, NewActiveQueryState :: map(), Rest :: binary()}
-        | {query_complete, Result :: term(), Rest :: binary()}
-        | {handler_updated, NewHandlerState :: term(), Rest :: binary()}
-        | {error, Reason :: term(), Rest :: binary()}
-        | {incomplete, Reason :: term()}.
-route_packet_to_handler(?SERVER_DATA, Data, ActiveQueryState, _State) ->
-    handle_data_packet(Data, ActiveQueryState);
-route_packet_to_handler(?SERVER_END_OF_STREAM, Data, ActiveQueryState, _State) ->
-    handle_end_of_stream_packet(Data, ActiveQueryState);
-route_packet_to_handler(?SERVER_PROGRESS, Data, ActiveQueryState, _State) ->
-    handle_optional_callback_packet(
-        Data,
-        ActiveQueryState,
-        on_progress,
-        fun clickhouse_erl_response_handler:handle_progress_packet_with_state/3
-    );
-route_packet_to_handler(?SERVER_PROFILE, Data, ActiveQueryState, _State) ->
-    handle_optional_callback_packet(
-        Data,
-        ActiveQueryState,
-        on_profile,
-        fun clickhouse_erl_response_handler:handle_profile_packet_with_state/3
-    );
-route_packet_to_handler(?SERVER_PROFILE_EVENTS, Data, ActiveQueryState, _State) ->
-    handle_optional_callback_packet(
-        Data,
-        ActiveQueryState,
-        on_profile_events,
-        fun clickhouse_erl_response_handler:handle_profile_events_packet_with_state/3
-    );
-route_packet_to_handler(PacketType, Data, ActiveQueryState, _State) ->
-    handle_generic_packet(PacketType, Data, ActiveQueryState).
-
-%% @doc Handle SERVER_DATA packet with callback-based processing
--spec handle_data_packet(Data, ActiveQueryState) -> HandlerResult when
-    Data :: binary(),
-    ActiveQueryState :: active_query_state(),
-    HandlerResult ::
-        {data_updated, NewActiveQueryState :: map(), Rest :: binary()}
-        | {error, Reason :: term(), Rest :: binary()}
-        | {incomplete, Reason :: term()}.
-handle_data_packet(Data, ActiveQueryState) ->
-    #{handler_state := HandlerState} = ActiveQueryState,
-    CompressionOpts = maps:get(compression_opts, ActiveQueryState, undefined),
-    CallbackInfo = #{
-        on_data => maps:get(on_data, ActiveQueryState),
-        accumulator => maps:get(accumulator, ActiveQueryState),
-        compression_opts => CompressionOpts
-    },
-
-    case
-        clickhouse_erl_response_handler:handle_data_packet_with_callback(
-            Data, HandlerState, CallbackInfo
-        )
-    of
-        {ok, NewHandlerState, Rest, NewCallbackInfo} ->
-            ?LOG_DEBUG(
-                "handle_data_packet: DATA packet parsed successfully, ~p bytes remaining~n",
-                [byte_size(Rest)]
-            ),
-            NewActiveQueryState = ActiveQueryState#{
-                handler_state := NewHandlerState,
-                accumulator := maps:get(accumulator, NewCallbackInfo)
+            {noreply, State};
+        #{caller := Caller, timer_ref := TimerRef} ->
+            maybe_cancel_timer(TimerRef),
+            gen_server:reply(Caller, Reply),
+            CompletedState = State#connection_state{
+                active_query_state = undefined,
+                parser_state = undefined
             },
-            {data_updated, NewActiveQueryState, Rest};
-        {error, Reason, Rest} ->
-            ?LOG_DEBUG("handle_data_packet: error: ~p~n", [Reason]),
-            classify_error_result(Reason, Rest)
+            {noreply, CompletedState}
     end.
 
-%% @doc Handle SERVER_END_OF_STREAM packet (terminal packet)
--spec handle_end_of_stream_packet(Data, ActiveQueryState) -> HandlerResult when
-    Data :: binary(),
-    ActiveQueryState :: active_query_state(),
-    HandlerResult :: {query_complete, Result :: term(), Rest :: binary()}.
-handle_end_of_stream_packet(Data, ActiveQueryState) ->
-    #{handler_state := HandlerState} = ActiveQueryState,
-    CallbackInfo =
-        case maps:is_key(on_data, ActiveQueryState) of
-            true ->
-                #{
-                    on_data => maps:get(on_data, ActiveQueryState),
-                    accumulator => maps:get(accumulator, ActiveQueryState)
-                };
-            false ->
-                undefined
+%% @doc Cancel a timer if it is set.
+-spec maybe_cancel_timer(reference() | undefined) -> ok.
+maybe_cancel_timer(undefined) ->
+    ok;
+maybe_cancel_timer(TimerRef) ->
+    erlang:cancel_timer(TimerRef),
+    ok.
+
+%% @doc Handle the result of process_events after successful parsing.
+%% Checks for exceptions, end_of_stream, or continues waiting.
+-spec handle_parsed_events(
+    boolean(), map(), term(), state(), gen_tcp:socket()
+) -> {noreply, state()}.
+handle_parsed_events(HasEndOfStream, NewAccState, NewParserState, State, Socket) ->
+    NewState = State#connection_state{parser_state = NewParserState},
+    UpdatedQueryState =
+        case NewState#connection_state.active_query_state of
+            undefined -> undefined;
+            QS -> QS#{accumulator => NewAccState}
         end,
-
-    {complete, Result, Rest} =
-        clickhouse_erl_response_handler:handle_end_of_stream_packet_with_state(
-            Data, HandlerState, CallbackInfo
-        ),
-    ?LOG_DEBUG("handle_end_of_stream_packet: query completed with result~n", []),
-    {query_complete, Result, Rest}.
-
-%% @doc Handle packets with optional callbacks (PROGRESS, PROFILE, PROFILE_EVENTS)
--spec handle_optional_callback_packet(Data, ActiveQueryState, CallbackKey, HandlerFun) ->
-    HandlerResult
-when
-    Data :: binary(),
-    ActiveQueryState :: active_query_state(),
-    CallbackKey :: atom(),
-    HandlerFun :: fun((binary(), term(), map()) -> {ok, term(), binary()} | {error, term()}),
-    HandlerResult ::
-        {handler_updated, NewHandlerState :: term(), Rest :: binary()}
-        | {error, Reason :: term(), Rest :: binary()}
-        | {incomplete, Reason :: term()}.
-handle_optional_callback_packet(Data, ActiveQueryState, CallbackKey, HandlerFun) ->
-    #{handler_state := HandlerState} = ActiveQueryState,
-    CallbackInfo = #{CallbackKey => maps:get(CallbackKey, ActiveQueryState, fun(_) -> ok end)},
-
-    case HandlerFun(Data, HandlerState, CallbackInfo) of
-        {ok, NewHandlerState, Rest} ->
-            ?LOG_DEBUG(
-                "handle_optional_callback_packet: ~p packet parsed successfully, "
-                "~p bytes remaining~n",
-                [CallbackKey, byte_size(Rest)]
-            ),
-            {handler_updated, NewHandlerState, Rest};
-        {error, Reason, Rest} ->
-            classify_error_result(Reason, Rest)
+    NewState2 = NewState#connection_state{active_query_state = UpdatedQueryState},
+    ExceptionInfo = maps:get(exception_info, NewAccState, undefined),
+    case ExceptionInfo of
+        Info when is_map(Info), map_size(Info) > 0 ->
+            ?LOG_DEBUG("Exception received: ~p~n", [Info]),
+            complete_query(NewState2, {error, {server_exception, Info}});
+        _ ->
+            handle_end_or_continue(HasEndOfStream, NewAccState, NewState2, Socket)
     end.
 
-%% @doc Classify error result - handle truncated data errors
-%% Returns {incomplete, Reason} for truncated data, {error, Reason, Rest} otherwise
--spec classify_error_result(Reason, Rest) -> {incomplete, Reason} | {error, Reason, Rest} when
-    Reason :: term(),
-    Rest :: binary().
-classify_error_result(Reason, Rest) ->
-    case is_truncated_data_error(Reason) of
-        true -> {incomplete, Reason};
-        false -> {error, Reason, Rest}
+%% @doc Handle end_of_stream or reactivate socket for more data.
+-spec handle_end_or_continue(
+    boolean(), map(), state(), gen_tcp:socket()
+) -> {noreply, state()}.
+handle_end_or_continue(true, NewAccState, State, _Socket) ->
+    ?LOG_DEBUG("Query completed (end_of_stream received)~n", []),
+    case State#connection_state.active_query_state of
+        undefined ->
+            ?LOG_WARNING("Received end_of_stream but no active query~n", []),
+            {noreply, State};
+        AQS ->
+            Result =
+                case maps:get(is_insert, AQS, false) of
+                    true ->
+                        RowsToInsert = maps:get(rows_to_insert, AQS, 0),
+                        #{rows_inserted => RowsToInsert};
+                    false ->
+                        build_query_result(NewAccState)
+                end,
+            complete_query(State, {ok, Result})
+    end;
+handle_end_or_continue(false, _NewAccState, State, Socket) ->
+    case inet:setopts(Socket, [{active, once}]) of
+        ok ->
+            {noreply, State};
+        {error, SocketError} ->
+            ?LOG_ERROR("Failed to reactivate socket: ~p~n", [SocketError]),
+            ErrorState = State#connection_state{
+                state = error,
+                error_reason =
+                    {network_error, {socket_reactivation_failed, SocketError}}
+            },
+            {noreply, ErrorState}
     end.
-
-%% @doc Handle generic packets (fallback for unknown packet types)
--spec handle_generic_packet(PacketType, Data, ActiveQueryState) -> HandlerResult when
-    PacketType :: integer(),
-    Data :: binary(),
-    ActiveQueryState :: active_query_state(),
-    HandlerResult ::
-        {handler_updated, NewHandlerState :: term(), Rest :: binary()}
-        | {error, Reason :: term(), Rest :: binary()}
-        | {incomplete, Reason :: term()}.
-handle_generic_packet(PacketType, Data, ActiveQueryState) ->
-    #{handler_state := HandlerState} = ActiveQueryState,
-    case clickhouse_erl_response_handler:handle_packet(PacketType, Data, HandlerState) of
-        {ok, NewHandlerState, Rest} ->
-            ?LOG_DEBUG(
-                "handle_generic_packet: packet type ~p parsed successfully, ~p bytes remaining~n",
-                [PacketType, byte_size(Rest)]
-            ),
-            {handler_updated, NewHandlerState, Rest};
-        {error, Reason, Rest} when is_tuple(Reason) ->
-            classify_error_result(Reason, Rest);
-        {error, Reason} when is_tuple(Reason) ->
-            classify_error_result(Reason, <<>>)
-    end.
-
-%% @doc Process handler result and update connection state
--spec process_handler_result(HandlerResult, IsCancelled, ActiveQueryState, State) ->
-    {ok, NewState, Rest} | {incomplete, Reason} | {error, Reason}
-when
-    HandlerResult ::
-        {data_updated, NewActiveQueryState :: map(), Rest :: binary()}
-        | {query_complete, Result :: term(), Rest :: binary()}
-        | {handler_updated, NewHandlerState :: term(), Rest :: binary()}
-        | {error, Reason :: term(), Rest :: binary()}
-        | {incomplete, Reason :: term()},
-    IsCancelled :: boolean(),
-    ActiveQueryState :: active_query_state(),
-    State :: state(),
-    NewState :: state(),
-    Rest :: binary(),
-    Reason :: term().
-process_handler_result(
-    {data_updated, _NewActiveQueryState, Rest}, true, _ActiveQueryState, State
-) ->
-    %% Ignore data for cancelled query
-    {ok, State, Rest};
-process_handler_result(
-    {data_updated, NewActiveQueryState, Rest}, false, _ActiveQueryState, State
-) ->
-    NewState = State#connection_state{active_query_state = NewActiveQueryState},
-    {ok, NewState, Rest};
-process_handler_result({query_complete, Result, Rest}, _IsCancelled, ActiveQueryState, State) ->
-    #{caller := Caller, timer_ref := TimerRef} = ActiveQueryState,
-    cancel_timer_and_reply_ok(TimerRef, Caller, ActiveQueryState, Result),
-    NewState = State#connection_state{active_query_state = undefined},
-    {ok, NewState, Rest};
-process_handler_result(
-    {handler_updated, NewHandlerState, Rest}, IsCancelled, ActiveQueryState, State
-) ->
-    update_state_if_not_cancelled(IsCancelled, State, ActiveQueryState, NewHandlerState, Rest);
-process_handler_result(
-    {error, {callback_failed, _} = Reason, Rest}, _IsCancelled, ActiveQueryState, State
-) ->
-    #{caller := Caller, timer_ref := TimerRef} = ActiveQueryState,
-    ?LOG_DEBUG("process_handler_result: callback failed: ~p~n", [Reason]),
-    cancel_timer_and_reply(TimerRef, Caller, ActiveQueryState, Reason),
-    NewState = State#connection_state{active_query_state = undefined},
-    {ok, NewState, Rest};
-process_handler_result(
-    {error, {server_exception, _} = Reason, Rest}, _IsCancelled, ActiveQueryState, State
-) ->
-    #{caller := Caller, timer_ref := TimerRef} = ActiveQueryState,
-    ?LOG_DEBUG("process_handler_result: server exception received~n", []),
-    cancel_timer_and_reply(TimerRef, Caller, ActiveQueryState, Reason),
-    NewState = State#connection_state{active_query_state = undefined},
-    {ok, NewState, Rest};
-process_handler_result({error, Reason, _Rest}, _IsCancelled, ActiveQueryState, _State) ->
-    #{caller := Caller, timer_ref := TimerRef} = ActiveQueryState,
-    handle_packet_error(Reason, TimerRef, Caller, ActiveQueryState);
-process_handler_result({incomplete, Reason}, _IsCancelled, _ActiveQueryState, _State) ->
-    {incomplete, Reason}.
 
 %% @doc Cancel timer and reply with error if not already replied
 %% Helper function to eliminate code duplication
@@ -2973,44 +2682,6 @@ cancel_timer_and_reply(TimerRef, Caller, ActiveQueryState, Error) ->
             ok
     end.
 
-%% @doc Cancel timer and reply with success if not already replied
-%% Helper function to eliminate code duplication
--spec cancel_timer_and_reply_ok(TimerRef, Caller, ActiveQueryState, Result) -> ok when
-    TimerRef :: reference() | undefined,
-    Caller :: {pid(), term()},
-    ActiveQueryState :: map(),
-    Result :: term().
-cancel_timer_and_reply_ok(TimerRef, Caller, ActiveQueryState, Result) ->
-    case TimerRef of
-        undefined -> ok;
-        _ -> erlang:cancel_timer(TimerRef)
-    end,
-    case maps:get(replied, ActiveQueryState, false) of
-        false ->
-            gen_server:reply(Caller, {ok, Result});
-        true ->
-            ok
-    end.
-
-%% @doc Update state with new handler state if query not cancelled
-%% Helper function to reduce nesting level
--spec update_state_if_not_cancelled(IsCancelled, State, ActiveQueryState, NewHandlerState, Rest) ->
-    {ok, NewState, Rest}
-when
-    IsCancelled :: boolean(),
-    State :: state(),
-    ActiveQueryState :: map(),
-    NewHandlerState :: term(),
-    Rest :: binary(),
-    NewState :: state().
-update_state_if_not_cancelled(true, State, _ActiveQueryState, _NewHandlerState, Rest) ->
-    %% Ignore data for cancelled query
-    {ok, State, Rest};
-update_state_if_not_cancelled(false, State, ActiveQueryState, NewHandlerState, Rest) ->
-    NewActiveQueryState = ActiveQueryState#{handler_state := NewHandlerState},
-    NewState = State#connection_state{active_query_state = NewActiveQueryState},
-    {ok, NewState, Rest}.
-
 %% @doc Create timeout timer reference
 %% Helper function to eliminate code duplication in timer creation
 -spec create_timeout_timer(timeout(), binary()) -> reference() | undefined.
@@ -3018,72 +2689,6 @@ create_timeout_timer(infinity, _QueryId) ->
     undefined;
 create_timeout_timer(Timeout, QueryId) ->
     erlang:send_after(Timeout, self(), {query_timeout, QueryId}).
-
-%% @doc Get default on_data callback for batch mode
-%% Helper function to eliminate code duplication
--spec get_default_on_data_callback() -> fun((map(), list()) -> list()).
-get_default_on_data_callback() ->
-    fun(DataBlock, Acc) ->
-        clickhouse_erl_response_handler:accumulate_data_block_callback(DataBlock, Acc)
-    end.
-
-%% @doc Detect if an error is a truncated_data error (incomplete packet)
-%% Requirements: REQ-4.1, REQ-4.2
--spec is_truncated_data_error(Error) -> boolean() when
-    Error :: term().
-is_truncated_data_error({truncated_data, _}) ->
-    true;
-is_truncated_data_error({profile_events_decode_failed, {truncated_data, _}}) ->
-    true;
-is_truncated_data_error({profile_events_decode_error, truncated_data}) ->
-    true;
-is_truncated_data_error({profile_events_decode_error, {truncated_data, _}}) ->
-    true;
-is_truncated_data_error({data_block_decode_error, truncated_data}) ->
-    true;
-is_truncated_data_error({data_block_decode_error, {truncated_data, _}}) ->
-    true;
-is_truncated_data_error({data_block_decode_error, {decoding_failed, {_, {truncated_data, _}}}}) ->
-    true;
-is_truncated_data_error({decoding_failed, {_, {truncated_data, _}}}) ->
-    true;
-is_truncated_data_error({decompression_failed, {truncated_data, _}}) ->
-    true;
-is_truncated_data_error({decompression_failed, {invalid_compressed_block, too_small}}) ->
-    true;
-is_truncated_data_error({temp_table_decode_error, {truncated_data, _}}) ->
-    true;
-is_truncated_data_error({protocol_error, Inner}) ->
-    %% Check if the inner error is a truncated_data error (recursive check)
-    is_truncated_data_error(Inner);
-is_truncated_data_error({exception_parsing_error, Details}) when is_list(Details) ->
-    %% Check if the details contain truncated_data information
-    DetailsStr = lists:flatten(Details),
-    string:find(DetailsStr, "truncated_data") =/= nomatch;
-is_truncated_data_error(_) ->
-    false.
-
-%% @doc Handle packet parsing errors (truncated data vs protocol errors)
--spec handle_packet_error(term(), term(), term(), map()) ->
-    {incomplete, term()} | {error, term()}.
-handle_packet_error(Reason, TimerRef, Caller, ActiveQueryState) ->
-    case is_truncated_data_error(Reason) of
-        true ->
-            %% Incomplete packet - need more data
-            ?LOG_DEBUG(
-                "parse_query_packet_data: incomplete packet detected "
-                "(truncated_data), need more data~n",
-                []
-            ),
-            {incomplete, Reason};
-        false ->
-            %% Real protocol error
-            ?LOG_DEBUG("parse_query_packet_data: protocol error: ~p~n", [Reason]),
-            cancel_timer_and_reply(
-                TimerRef, Caller, ActiveQueryState, {protocol_error, Reason}
-            ),
-            {error, Reason}
-    end.
 
 %% @doc Safely invoke optional callback (non-fatal errors)
 %% Optional callbacks (on_progress, on_profile, on_profile_events) are invoked
@@ -3134,6 +2739,37 @@ check_connection_ready(#connection_state{state = error, error_reason = ErrorReas
     {error, ErrorReason};
 check_connection_ready(#connection_state{state = connecting}) ->
     {error, {protocol_error, "Connection not ready"}}.
+
+%% @doc Format binary data for logging
+%% At INFO level: shows only first 20 bytes
+%% At DEBUG level: shows full binary
+-spec format_binary_for_log(binary()) -> iolist().
+format_binary_for_log(Binary) when byte_size(Binary) =< 20 ->
+    %% Small binary - show all
+    io_lib:format("~p", [Binary]);
+format_binary_for_log(Binary) ->
+    %% Large binary - show first 20 bytes at INFO, full at DEBUG
+    case logger:get_module_level(?MODULE) of
+        [{?MODULE, debug}] ->
+            io_lib:format("~p", [Binary]);
+        _ ->
+            <<First20:20/binary, _/binary>> = Binary,
+            io_lib:format("~p... (~p bytes total)", [First20, byte_size(Binary)])
+    end.
+
+%% @doc Format error reason for logging, truncating any embedded binaries
+-spec format_error_for_log(term()) -> term().
+format_error_for_log({unknown_column_type, Type}) when is_binary(Type), byte_size(Type) > 50 ->
+    <<First50:50/binary, _/binary>> = Type,
+    {unknown_column_type, <<First50/binary, "... (truncated)">>};
+format_error_for_log({protocol_error, Inner}) ->
+    {protocol_error, format_error_for_log(Inner)};
+format_error_for_log({ErrorType, Details}) when is_tuple(Details) ->
+    {ErrorType, format_error_for_log(Details)};
+format_error_for_log({ErrorType, Details}) ->
+    {ErrorType, Details};
+format_error_for_log(Other) ->
+    Other.
 
 %% @doc Validate query parameters format
 %% Validates that all parameters are tuples of {binary(), binary()}.
@@ -3240,4 +2876,276 @@ get_compression_mode(CompressionOpts) when is_map(CompressionOpts) ->
         lz4 -> ?COMPRESSION_ENABLED;
         zstd -> ?COMPRESSION_ENABLED;
         none -> ?COMPRESSION_ENABLED
+    end.
+
+%% @doc Process a list of parser events against the accumulator state.
+%% Returns {HasEndOfStream, NeedMore, HasException, NewAccState}
+%% or {callback_error, Reason} if a streaming callback fails.
+-spec process_events([term()], map()) ->
+    {boolean(), boolean(), boolean(), map()} | {callback_error, term()}.
+process_events(EventList, AccState) ->
+    process_events_loop(EventList, false, false, false, AccState).
+
+-spec process_events_loop([term()], boolean(), boolean(), boolean(), map()) ->
+    {boolean(), boolean(), boolean(), map()} | {callback_error, term()}.
+process_events_loop([], EosAcc, NmAcc, ExAcc, Acc) ->
+    {EosAcc, NmAcc, ExAcc, Acc};
+process_events_loop([Event | Rest], EosAcc, NmAcc, ExAcc, Acc) ->
+    case process_single_event(Event, EosAcc, NmAcc, ExAcc, Acc) of
+        {callback_error, _Reason} = Err ->
+            Err;
+        {NewEos, NewNm, NewEx, NewAcc} ->
+            process_events_loop(Rest, NewEos, NewNm, NewEx, NewAcc)
+    end.
+
+-spec process_single_event(term(), boolean(), boolean(), boolean(), map()) ->
+    {boolean(), boolean(), boolean(), map()} | {callback_error, term()}.
+process_single_event(need_more, EosAcc, _NmAcc, ExAcc, Acc) ->
+    {EosAcc, true, ExAcc, Acc};
+process_single_event({start, server_exception}, EosAcc, NmAcc, _ExAcc, Acc) ->
+    {EosAcc, NmAcc, true, Acc#{
+        exception_info => #{},
+        current_block_type => server_exception
+    }};
+process_single_event({start, Type}, EosAcc, NmAcc, ExAcc, Acc) ->
+    {EosAcc, NmAcc, ExAcc, Acc#{current_block_type => Type}};
+process_single_event({'end', server_end_of_stream}, _EosAcc, NmAcc, ExAcc, Acc) ->
+    FinalizedAcc = finalize_streaming_end(Acc),
+    {true, NmAcc, ExAcc, FinalizedAcc};
+process_single_event({'end', server_exception}, EosAcc, NmAcc, _ExAcc, Acc) ->
+    {EosAcc, NmAcc, true, Acc#{current_block_type => undefined}};
+process_single_event({'end', Type}, EosAcc, NmAcc, ExAcc, Acc) when
+    Type =:= server_data; Type =:= server_totals; Type =:= server_extremes
+->
+    CBT = maps:get(current_block_type, Acc, undefined),
+    Finalized =
+        case CBT of
+            server_data -> finalize_current_column(Acc);
+            _ -> Acc
+        end,
+    {EosAcc, NmAcc, ExAcc, Finalized#{current_block_type => undefined}};
+process_single_event({'end', _Type}, EosAcc, NmAcc, ExAcc, Acc) ->
+    {EosAcc, NmAcc, ExAcc, Acc#{current_block_type => undefined}};
+process_single_event({data, Field, Value}, EosAcc, NmAcc, ExAcc, Acc) when ExAcc ->
+    NewAcc = accumulate_exception_field(Field, Value, Acc),
+    {EosAcc, NmAcc, ExAcc, NewAcc};
+process_single_event({data, column, ColumnMeta}, EosAcc, NmAcc, ExAcc, Acc) ->
+    case maps:get(current_block_type, Acc, undefined) of
+        server_data ->
+            TmpAcc = finalize_current_column(Acc),
+            ColName = maps:get(name, ColumnMeta, undefined),
+            {EosAcc, NmAcc, ExAcc, TmpAcc#{
+                current_column => ColumnMeta,
+                current_column_name => ColName,
+                column_data => []
+            }};
+        _ ->
+            {EosAcc, NmAcc, ExAcc, Acc}
+    end;
+process_single_event({data, column_value, Value}, EosAcc, NmAcc, ExAcc, Acc) ->
+    case maps:get(current_block_type, Acc, undefined) of
+        server_data ->
+            dispatch_column_value(Value, EosAcc, NmAcc, ExAcc, Acc);
+        _ ->
+            {EosAcc, NmAcc, ExAcc, Acc}
+    end;
+process_single_event({data, wrote_rows, WroteRows}, EosAcc, NmAcc, ExAcc, Acc) ->
+    PrevWritten = maps:get(rows_written, Acc, 0),
+    {EosAcc, NmAcc, ExAcc, Acc#{rows_written => PrevWritten + WroteRows}};
+process_single_event({data, _Field, _Value}, EosAcc, NmAcc, ExAcc, Acc) ->
+    {EosAcc, NmAcc, ExAcc, Acc}.
+
+%% @doc Finalize streaming mode on end_of_stream by calling callback with 'end'.
+-spec finalize_streaming_end(map()) -> map().
+finalize_streaming_end(Acc) ->
+    case maps:get(on_data_callback, Acc, undefined) of
+        undefined ->
+            Acc;
+        Callback ->
+            UserAcc = maps:get(user_acc, Acc),
+            {ok, FinalUserAcc} = Callback('end', UserAcc),
+            Acc#{user_acc => FinalUserAcc}
+    end.
+
+%% @doc Map parser exception field names to API names and accumulate.
+-spec accumulate_exception_field(atom(), term(), map()) -> map().
+accumulate_exception_field(Field, Value, Acc) ->
+    MappedField =
+        case Field of
+            error_code -> code;
+            exception_name -> name;
+            stack_trace -> stack_trace;
+            Other -> Other
+        end,
+    ExInfo = maps:get(exception_info, Acc, #{}),
+    Acc#{exception_info => ExInfo#{MappedField => Value}}.
+
+%% @doc Dispatch a column value in batch or streaming mode.
+-spec dispatch_column_value(term(), boolean(), boolean(), boolean(), map()) ->
+    {boolean(), boolean(), boolean(), map()} | {callback_error, term()}.
+dispatch_column_value(Value, EosAcc, NmAcc, ExAcc, Acc) ->
+    case maps:get(on_data_callback, Acc, undefined) of
+        undefined ->
+            ColData = maps:get(column_data, Acc, []),
+            {EosAcc, NmAcc, ExAcc, Acc#{column_data => [Value | ColData]}};
+        Callback ->
+            invoke_streaming_callback(Callback, Value, EosAcc, NmAcc, ExAcc, Acc)
+    end.
+
+%% @doc Invoke the user streaming callback, returning error tuple on failure.
+-spec invoke_streaming_callback(function(), term(), boolean(), boolean(), boolean(), map()) ->
+    {boolean(), boolean(), boolean(), map()} | {callback_error, term()}.
+invoke_streaming_callback(Callback, Value, EosAcc, NmAcc, ExAcc, Acc) ->
+    ColName = maps:get(current_column_name, Acc, undefined),
+    UserAcc = maps:get(user_acc, Acc),
+    try Callback({data, #{name => ColName, value => Value}}, UserAcc) of
+        {ok, NewUserAcc} ->
+            {EosAcc, NmAcc, ExAcc, Acc#{user_acc => NewUserAcc}};
+        {error, Reason} ->
+            {callback_error, Reason};
+        Other ->
+            {callback_error, {invalid_callback_return, Other}}
+    catch
+        error:Err:Stack ->
+            {callback_error, {callback_crashed, {error, Err, Stack}}}
+    end.
+
+%% @doc Initialize accumulator state for event processing.
+%% In streaming mode (user provided on_data callback), stores the callback
+%% and user accumulator in AccState for per-value dispatch.
+%% In batch mode, AccState has no callback fields — column accumulation
+%% uses the existing path.
+-spec init_acc_state(ActiveQueryState :: map()) -> map().
+init_acc_state(ActiveQueryState) ->
+    Base = #{
+        columns => [],
+        current_column => undefined,
+        current_column_name => undefined,
+        column_data => [],
+        current_block_type => undefined,
+        exception_info => undefined,
+        rows_written => 0
+    },
+    case maps:get(streaming_mode, ActiveQueryState, false) of
+        true ->
+            Base#{
+                on_data_callback => maps:get(on_data, ActiveQueryState),
+                user_acc => maps:get(accumulator, ActiveQueryState)
+            };
+        false ->
+            Base
+    end.
+
+%% @doc Finalize current column by adding it to the columns list
+-spec finalize_current_column(map()) -> map().
+finalize_current_column(#{current_column := undefined} = AccState) ->
+    %% No current column to finalize
+    AccState;
+finalize_current_column(
+    #{current_column := ColumnMeta, column_data := ColumnData, columns := Columns} = AccState
+) ->
+    case ColumnData of
+        [] ->
+            %% Empty column (from header block with 0 rows) - skip it
+            AccState#{
+                current_column => undefined,
+                column_data => []
+            };
+        _ ->
+            %% Reverse column data (was accumulated in reverse)
+            NewData = lists:reverse(ColumnData),
+            ColName = maps:get(name, ColumnMeta),
+            %% Check if column already exists (multi-block result) and merge
+            case find_and_merge_column(ColName, NewData, Columns) of
+                {merged, MergedColumns} ->
+                    AccState#{
+                        columns => MergedColumns,
+                        current_column => undefined,
+                        column_data => []
+                    };
+                not_found ->
+                    FinalColumn = ColumnMeta#{data => NewData},
+                    AccState#{
+                        columns => [FinalColumn | Columns],
+                        current_column => undefined,
+                        column_data => []
+                    }
+            end
+    end;
+finalize_current_column(AccState) ->
+    %% No current column
+    AccState.
+
+%% @doc Find a column by name and merge new data into it.
+%% Returns {merged, UpdatedColumns} if found, or not_found.
+-spec find_and_merge_column(binary(), [term()], [map()]) ->
+    {merged, [map()]} | not_found.
+find_and_merge_column(_Name, _NewData, []) ->
+    not_found;
+find_and_merge_column(Name, NewData, Columns) ->
+    find_and_merge_column(Name, NewData, Columns, []).
+
+-spec find_and_merge_column(binary(), [term()], [map()], [map()]) ->
+    {merged, [map()]} | not_found.
+find_and_merge_column(_Name, _NewData, [], _Acc) ->
+    not_found;
+find_and_merge_column(Name, NewData, [Col | Rest], Acc) ->
+    case maps:get(name, Col) of
+        Name ->
+            %% Found matching column - append new data
+            ExistingData = maps:get(data, Col, []),
+            MergedCol = Col#{data => ExistingData ++ NewData},
+            {merged, lists:reverse(Acc) ++ [MergedCol | Rest]};
+        _ ->
+            find_and_merge_column(Name, NewData, Rest, [Col | Acc])
+    end.
+
+%% @doc Build query result from accumulated data.
+%% In streaming mode (on_data_callback present), returns #{data => FinalUserAcc}.
+%% In batch mode, returns column-oriented result with rows.
+-spec build_query_result(map()) -> map().
+build_query_result(#{on_data_callback := _, user_acc := UserAcc}) ->
+    %% Streaming mode: return the user's finalized accumulator
+    #{data => UserAcc};
+build_query_result(#{columns := Columns} = _AccState) when is_list(Columns), length(Columns) > 0 ->
+    %% Reverse columns (accumulated in reverse order)
+    FinalColumns = lists:reverse(Columns),
+
+    %% Convert column-oriented data to row-oriented format
+    Rows = transpose_columns_to_rows(FinalColumns),
+
+    #{
+        data => #{
+            columns => [
+                #{name => maps:get(name, C), type => maps:get(type, C)}
+             || C <- FinalColumns
+            ],
+            rows => Rows
+        }
+    };
+build_query_result(_AccState) ->
+    %% Empty result
+    #{data => #{columns => [], rows => []}}.
+
+%% @doc Transpose column-oriented data to row-oriented format
+-spec transpose_columns_to_rows([map()]) -> [[term()]].
+transpose_columns_to_rows([]) ->
+    [];
+transpose_columns_to_rows(Columns) ->
+    %% Get column data lists
+    ColumnDataLists = [maps:get(data, Col, []) || Col <- Columns],
+
+    %% Check if all columns have data
+    case lists:all(fun(L) -> length(L) > 0 end, ColumnDataLists) of
+        false ->
+            %% No data or empty columns
+            [];
+        true ->
+            %% Transpose: convert [[col1_row1, col1_row2], [col2_row1, col2_row2]]
+            %% to [[col1_row1, col2_row1], [col1_row2, col2_row2]]
+            NumRows = length(hd(ColumnDataLists)),
+            [
+                [lists:nth(RowIdx, ColData) || ColData <- ColumnDataLists]
+             || RowIdx <- lists:seq(1, NumRows)
+            ]
     end.

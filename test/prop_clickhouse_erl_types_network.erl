@@ -150,7 +150,7 @@ prop_ipv4_roundtrip() ->
 %%%===================================================================
 
 %% @doc Property: For any IPv4 value, encoding should produce exactly
-%% 4 bytes in big-endian (network byte order).
+%% 4 bytes in little-endian order (ClickHouse native format).
 prop_ipv4_encoding_format() ->
     ?FORALL(
         IPv4,
@@ -162,10 +162,10 @@ prop_ipv4_encoding_format() ->
                     ByteSize = byte_size(Encoded),
                     case ByteSize =:= 4 of
                         true ->
-                            % Verify big-endian encoding by decoding and re-encoding
+                            % Verify little-endian encoding by decoding and re-encoding
                             {ok, Tuple, <<>>} = clickhouse_erl_types_network:decode_ipv4(Encoded),
                             {A, B, C, D} = Tuple,
-                            Expected = <<A:8, B:8, C:8, D:8>>,
+                            Expected = <<D:8, C:8, B:8, A:8>>,
                             Encoded =:= Expected;
                         false ->
                             {false, {wrong_byte_size, ByteSize}}

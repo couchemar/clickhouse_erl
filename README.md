@@ -18,7 +18,7 @@ This is a low-level library focused on protocol implementation. For connection p
 - **Compression**: LZ4, LZ4HC, and ZSTD support
 - **Comprehensive Type System**: Primitives, temporals, decimals, enums, network types, composites
 - **OTP Supervision**: Fault-isolated connections
-- **Streaming**: Large result set handling
+- **Streaming**: Large result set handling with `on_data` callbacks
 
 ## Installation
 
@@ -56,6 +56,20 @@ Input = [
     #{name => <<"name">>, type => <<"String">>, data => [<<"Alice">>, <<"Bob">>, <<"Charlie">>]}
 ],
 {ok, _} = clickhouse_erl:insert(Conn, SQL, Input).
+
+% Streaming callback (process rows without accumulating entire result)
+Callback = fun
+    ({data, #{name := Name, value := Value}}, Acc) ->
+        Existing = maps:get(Name, Acc, []),
+        {ok, Acc#{Name => [Value | Existing]}};
+    ('end', Acc) ->
+        {ok, maps:map(fun(_K, V) -> lists:reverse(V) end, Acc)}
+end,
+{ok, StreamResult} = clickhouse_erl:query(Conn, <<"SELECT name, salary FROM employees">>, #{
+    on_data => Callback,
+    initial_accumulator => #{}
+}).
+%% StreamResult: #{data => #{<<"name">> => [...], <<"salary">> => [...]}}
 
 % Disconnect
 clickhouse_erl:disconnect(Conn).

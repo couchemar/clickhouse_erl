@@ -926,9 +926,9 @@ encode_ipv4_column_test() ->
     {ok, Result1} = clickhouse_erl_types_column:encode_ipv4_column([]),
     ?assertEqual([], Result1),
 
-    %% Single value
+    %% Single value (little-endian: {A,B,C,D} -> <<D,C,B,A>>)
     {ok, Result2} = clickhouse_erl_types_column:encode_ipv4_column([{192, 168, 1, 1}]),
-    ?assertEqual([<<192, 168, 1, 1>>], Result2),
+    ?assertEqual([<<1, 1, 168, 192>>], Result2),
 
     %% Multiple values
     {ok, Result3} = clickhouse_erl_types_column:encode_ipv4_column([
@@ -936,7 +936,7 @@ encode_ipv4_column_test() ->
         {10, 0, 0, 1},
         {127, 0, 0, 1}
     ]),
-    ?assertEqual([<<192, 168, 1, 1>>, <<10, 0, 0, 1>>, <<127, 0, 0, 1>>], Result3),
+    ?assertEqual([<<1, 1, 168, 192>>, <<1, 0, 0, 10>>, <<1, 0, 0, 127>>], Result3),
 
     %% Error case - invalid octet
     ?assertMatch(

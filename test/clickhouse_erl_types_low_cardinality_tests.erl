@@ -171,14 +171,10 @@ encode_decode_empty_test() ->
     Values = [],
     InnerType = string,
 
-    {ok, Encoded} = clickhouse_erl_types_low_cardinality:encode_low_cardinality_column(
-        Values, InnerType
-    ),
-    %% Prepend state version for decoding (normally done by data block encoder)
-    StateVersion = clickhouse_erl_types_integer:encode_int64(1),
-    EncodedWithState = <<StateVersion/binary, Encoded/binary>>,
-    {ok, Decoded, <<>>} = clickhouse_erl_types_low_cardinality:decode_low_cardinality_column(
-        EncodedWithState, InnerType, length(Values)
+    %% RowCount=0: decoder returns immediately without consuming any data.
+    %% ClickHouse doesn't send LowCardinality encoding for 0 rows.
+    {ok, Decoded, _Rest} = clickhouse_erl_types_low_cardinality:decode_low_cardinality_column(
+        <<>>, InnerType, length(Values)
     ),
 
     ?assertEqual(Values, Decoded).

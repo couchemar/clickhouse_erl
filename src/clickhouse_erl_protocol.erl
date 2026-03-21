@@ -54,11 +54,12 @@ encode_client_hello(ClientInfo) ->
 %% @doc Decode a Server Hello message.
 %%
 %% Decodes according to ClickHouse protocol specification.
--spec decode_server_hello(binary()) -> {ok, server_hello_info()} | {error, term()}.
+-spec decode_server_hello(binary()) -> {ok, server_hello_info(), binary()} | {error, term()}.
 decode_server_hello(Binary) ->
     clickhouse_erl_protocol_server_hello:decode(Binary).
 
--spec decode_server_hello(binary(), integer()) -> {ok, server_hello_info()} | {error, term()}.
+-spec decode_server_hello(binary(), integer()) ->
+    {ok, server_hello_info(), binary()} | {error, term()}.
 decode_server_hello(Binary, Version) ->
     clickhouse_erl_protocol_server_hello:decode(Binary, Version).
 
@@ -158,9 +159,22 @@ create_exception_info(ErrorCode, ExceptionName, Message, StackTrace, Nested, Nes
 %%
 %% Validates that all required fields are present and non-empty.
 %% Handles incomplete exception data by checking for missing or empty fields.
--spec is_complete_exception(exception_info()) -> boolean().
+%% Supports both #exception_info{} records and map-based exception info.
+-spec is_complete_exception(exception_info() | map()) -> boolean().
+is_complete_exception(#{code := Code, name := Name, message := Message} = Info) ->
+    %% Map-based exception info (from event-driven parser)
+    StackTrace = maps:get(stack_trace, Info, <<>>),
+    Nested = maps:get(nested, Info, false),
+    is_integer(Code) andalso
+        is_binary(Name) andalso byte_size(Name) > 0 andalso
+        is_binary(Message) andalso byte_size(Message) > 0 andalso
+        is_binary(StackTrace) andalso
+        is_boolean(Nested);
+is_complete_exception(Info) when is_map(Info) ->
+    %% Map missing required fields (code, name, or message) — incomplete
+    false;
 is_complete_exception(ExceptionInfo) ->
-    %% Check that all required fields are present and valid
+    %% Record-based exception info (legacy)
     ErrorCode = ExceptionInfo#exception_info.error_code,
     ExceptionName = ExceptionInfo#exception_info.exception_name,
     Message = ExceptionInfo#exception_info.message,
