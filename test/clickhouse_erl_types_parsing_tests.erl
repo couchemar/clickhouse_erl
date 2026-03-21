@@ -252,7 +252,8 @@ recognize_enum16_test() ->
 
 %% Network Types
 recognize_ipv4_test() ->
-    Binary = <<192, 168, 1, 1>>,
+    %% Little-endian: {192,168,1,1} stored as <<1,1,168,192>>
+    Binary = <<1, 1, 168, 192>>,
     Result = clickhouse_erl_protocol_data_block:decode_column_data(<<"IPv4">>, 1, Binary),
     ?assertMatch({ok, [{192, 168, 1, 1}], <<>>}, Result).
 

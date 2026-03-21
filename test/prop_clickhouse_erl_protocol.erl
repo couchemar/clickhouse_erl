@@ -49,7 +49,7 @@ prop_error_handling_for_invalid_messages() ->
                             {error, _OtherError} ->
                                 %% Other error types are also acceptable
                                 true;
-                            {ok, _} ->
+                            {ok, _, _} ->
                                 %% Some binary data might accidentally be valid
                                 true
                         end

@@ -531,17 +531,17 @@ wait_for_state(Pid, ExpectedState, Retries) ->
 %% --- Helper Functions ---
 
 create_server_hello_packet() ->
-    %% ServerName (String), Major, Minor, Revision (VarInt), Timezone (String), DisplayName (String), Patch
-    %% "ClickHouse", 21, 9, 12345, "UTC", "ClickHouse Server", 0
-    Name = <<10, "ClickHouse">>,
-    % VarInt encoding (simplified, strict varint would be different but connection uses decode_varint)
-    Major = <<21, 0, 0, 0, 0, 0, 0, 0>>,
-    Minor = <<9, 0, 0, 0, 0, 0, 0, 0>>,
-    % 12345
-    Revision = <<57, 48, 0, 0, 0, 0, 0, 0>>,
-    Timezone = <<3, "UTC">>,
-    DisplayName = <<17, "ClickHouse Server">>,
-    Patch = <<0, 0, 0, 0, 0, 0, 0, 0>>,
+    %% Build a proper Server_Hello packet using varint encoding
+    %% Fields: name (string), major (varint), minor (varint), revision (varint),
+    %%         timezone (string), display_name (string), patch (varint)
+    Name = clickhouse_erl_types_primitive:encode_string(<<"ClickHouse">>),
+    Major = clickhouse_erl_types_primitive:encode_varint(21),
+    Minor = clickhouse_erl_types_primitive:encode_varint(9),
+    %% Revision 54451 - high enough for timezone, display_name, version_patch features
+    Revision = clickhouse_erl_types_primitive:encode_varint(54451),
+    Timezone = clickhouse_erl_types_primitive:encode_string(<<"UTC">>),
+    DisplayName = clickhouse_erl_types_primitive:encode_string(<<"ClickHouse Server">>),
+    Patch = clickhouse_erl_types_primitive:encode_varint(0),
     Packet =
         <<Name/binary, Major/binary, Minor/binary, Revision/binary, Timezone/binary,
             DisplayName/binary, Patch/binary>>,

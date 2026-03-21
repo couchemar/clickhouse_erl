@@ -110,12 +110,14 @@ low_cardinality_gen(InnerGen) ->
             %% Generate a small set of unique values
             UniqueValues = [InnerGen || _ <- lists:seq(1, UniqueCount)],
             %% Repeat them to create a larger dataset with low cardinality
+            %% Use non_empty/1 because ClickHouse doesn't send LowCardinality
+            %% encoding for 0 rows (decoder returns immediately for RowCount=0)
             ?LET(
                 Uniques,
                 UniqueValues,
                 ?LET(
                     Indices,
-                    list(range(0, length(Uniques) - 1)),
+                    non_empty(list(range(0, length(Uniques) - 1))),
                     [lists:nth(I + 1, Uniques) || I <- Indices]
                 )
             )

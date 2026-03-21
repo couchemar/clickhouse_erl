@@ -274,3 +274,214 @@ execute_query_with_handling(Conn, SQL) ->
             {error, Reason}
     end.
 ```
+
+
+## Streaming Callbacks
+
+Process query results incrementally using the `on_data` callback, avoiding accumulation of the entire result set in memory. This is the recommended approach for large result sets.
+
+### Callback Signature
+
+```erlang
+fun(Event, Acc) -> {ok, NewAcc}
+```
+
+Where `Event` is one of:
+- `{data, #{name => ColumnName, value => Value}}` — a single column value, tagged with the column name
+- `'end'` — sent when the query completes (end of stream), use to finalize results
+
+### Basic Usage
+
+Pass `on_data` and `initial_accumulator` in the query options map:
+
+```erlang
+Callback = fun
+    ({data, #{name := Name, value := Value}}, Acc) ->
+        Existing = maps:get(Name, Acc, []),
+        {ok, Acc#{Name => [Value | Existing]}};
+    ('end', Acc) ->
+        {ok, maps:map(fun(_K, V) -> lists:reverse(V) end, Acc)}
+end,
+
+{ok, Result} = clickhouse_erl:query(Conn, <<"SELECT name, salary FROM employees ORDER BY name">>, #{
+    on_data => Callback,
+    initial_accumulator => #{}
+}).
+
+%% Result: #{data => #{<<"name">> => [<<"Alice">>, <<"Bob">>], <<"salary">> => [50000, 60000]}}
+DataMap = maps:get(data, Result).
+```
+
+### How It Works
+
+ClickHouse sends data column-by-column (all values for column 1, then all values for column 2, etc.). The streaming callback receives each value tagged with its column name as it arrives from the wire. No intermediate accumulation occurs inside the client — values are dispatched directly to your callback.
+
+The `'end'` event fires when the server sends `END_OF_STREAM`, giving you a chance to finalize your accumulator (e.g., reverse accumulated lists).
+
+### Result Format
+
+- **Streaming mode** (`on_data` provided): Returns `#{data => FinalAccumulator}` where `FinalAccumulator` is the value returned by your callback's `'end'` clause.
+- **Batch mode** (no `on_data`): Returns the standard column-oriented result with `#{data => #{columns => [...], rows => [[...], ...]}}`.
+
+### Counting Values
+
+```erlang
+Callback = fun
+    ({data, #{name := _Name, value := _Value}}, Count) ->
+        {ok, Count + 1};
+    ('end', Count) ->
+        {ok, Count}
+end,
+
+{ok, Result} = clickhouse_erl:query(Conn, <<"SELECT * FROM large_table">>, #{
+    on_data => Callback,
+    initial_accumulator => 0
+}).
+
+TotalValues = maps:get(data, Result).
+```
+
+### Custom Aggregation
+
+```erlang
+Callback = fun
+    ({data, #{name := <<"salary">>, value := V}}, Acc) ->
+        {ok, Acc#{count => maps:get(count, Acc) + 1, sum => maps:get(sum, Acc) + V}};
+    ({data, _}, Acc) ->
+        {ok, Acc};
+    ('end', Acc) ->
+        {ok, Acc}
+end,
+
+{ok, Result} = clickhouse_erl:query(Conn, <<"SELECT name, salary FROM employees">>, #{
+    on_data => Callback,
+    initial_accumulator => #{count => 0, sum => 0}
+}).
+```
+
+### Error Handling
+
+If your callback returns `{error, Reason}` or crashes, the query fails with a descriptive error:
+
+```erlang
+%% Callback crash → {error, {callback_crashed, {Class, Reason, Stacktrace}}}
+%% Callback error → {error, {callback_failed, Reason}}
+%% Invalid return → {error, {invalid_callback_return, ReturnValue}}
+```
+
+### Supported Types
+
+Streaming callbacks support all scalar types (String, integers, floats, decimals, dates, UUIDs, etc.) and all composite types (Array, Tuple, Nullable, LowCardinality, Map).
+
+### When to Use Streaming vs Batch
+
+| Scenario | Mode | Reason |
+|----------|------|--------|
+| Large result sets (10k+ rows) | Streaming | Constant memory usage |
+| Custom aggregation during query | Streaming | No intermediate storage |
+| Small result sets | Batch | Simpler, returns complete result |
+
+
+## Internal Architecture: Event-Driven Parser
+
+This section describes how query responses are processed internally. Understanding this is useful for debugging, contributing, or reasoning about performance characteristics.
+
+### Data Flow
+
+When a query is executed, the server sends response packets over TCP. The client processes them through this pipeline:
+
+```
+TCP Socket
+    │
+    ▼
+handle_info({tcp, Socket, Data}, State)
+    │
+    ▼
+clickhouse_erl_parser:parse(Data, ParserState)
+    │
+    ▼
+{EventList, NewParserState}
+    │
+    ▼
+lists:foldl(fun process_event/2, AccState, EventList)
+    │
+    ▼
+Updated AccState (columns, callback results, etc.)
+```
+
+1. Raw TCP data arrives at the connection process (`clickhouse_erl_connection`)
+2. Data is passed directly to `clickhouse_erl_parser:parse/2` with the current parser state
+3. The parser emits a list of events and an updated parser state
+4. Events are processed sequentially via `lists:foldl/3` to update the accumulator state
+5. The updated parser state is stored in the connection state for the next TCP recv
+
+### Event Types
+
+The parser emits four types of events:
+
+- `{start, PacketType}` — a new packet has begun (e.g., `server_data`, `server_exception`)
+- `{data, FieldName, Value}` — a parsed field within the current packet
+- `{'end', PacketType}` — the current packet is complete
+- `need_more` — the parser needs more TCP data to continue (always the last event in the list)
+
+For a DATA packet, the event sequence looks like:
+
+```erlang
+{start, server_data}
+{data, temp_table_name, <<"">>}
+{data, block_info, #{is_overflows => false, bucket_num => -1}}
+{data, num_columns, 2}
+{data, num_rows, 3}
+{data, column, #{name => <<"id">>, type => <<"UInt64">>}}
+{data, column_value, 1}
+{data, column_value, 2}
+{data, column_value, 3}
+{data, column, #{name => <<"name">>, type => <<"String">>}}
+{data, column_value, <<"Alice">>}
+{data, column_value, <<"Bob">>}
+{data, column_value, <<"Charlie">>}
+{'end', server_data}
+```
+
+ClickHouse sends data column-by-column (all values for column 1, then all values for column 2), not row-by-row.
+
+### Incomplete Packets and Buffering
+
+The parser manages its own internal buffer. When a TCP segment contains only part of a packet:
+
+1. The parser processes as much as it can and emits any complete events
+2. It buffers the unparsed remainder internally in its state
+3. It emits `need_more` as the last event
+4. On the next TCP recv, the connection passes new data to the parser, which prepends its buffer automatically
+
+There is no connection-level buffer — the parser is the single source of truth for buffered data. This eliminates double-buffering and simplifies state management.
+
+### Compression Handling
+
+When compression is enabled on the connection, the server wraps block data (after the temp table name) in a compressed block:
+
+```
+[temp_table_name] [checksum: 16 bytes] [method: 1 byte] [compressed_size: 4 bytes] [original_size: 4 bytes] [compressed_payload]
+```
+
+The block parser handles this transparently:
+
+1. After parsing the temp table name, it checks if compression is enabled (from parser state)
+2. If enabled, it calls `clickhouse_erl_compression:decompress/1` on the remaining data
+3. The decompressed bytes are then parsed normally (block info, columns, values)
+4. If the compressed block is incomplete (not enough TCP data yet), the parser returns `need_more`
+
+Compression is configured at connection time and applies to all DATA, TOTALS, EXTREMES, and PROFILE_EVENTS packets:
+
+```erlang
+{ok, Conn} = clickhouse_erl:connect("localhost", 9000, #{compression => lz4}).
+```
+
+See the [Compression Guide](compression.md) for details on methods and configuration.
+
+### Streaming vs Batch Mode Internals
+
+The connection's event fold function (`lists:foldl/3`) maintains an accumulator state that tracks parsing context. The behavior differs based on whether `on_data` is provided in query options:
+
+- **Batch mode** (default): Column values are accumulated in an internal map. When `end_of_stream` arrives, the complete result is assembled and returned to the caller.
+- **Streaming mode** (`on_data` provided): Each `{data, column_value, Value}` event dispatches to the user's callback as `{data, #{name => ColumnName, value => Value}}`. When `end_of_stream` arrives, the callback receives `'end'` for finalization. No intermediate accumulation occurs inside the client.

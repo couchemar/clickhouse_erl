@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Event-driven streaming parser (`clickhouse_erl_parser` + `src/parsers/`) with dedicated modules for all server packet types: SERVER_HELLO, SERVER_DATA, SERVER_EXCEPTION, SERVER_PROGRESS, SERVER_PONG, SERVER_END_OF_STREAM, SERVER_PROFILE, SERVER_LOG, SERVER_TABLE_COLUMNS, SERVER_PART_UUIDS, SERVER_READ_TASK_REQUEST
+- `clickhouse_erl_parser_behaviour` module defining `-callback` declarations (`init/1`, `parse/2`) and exported types (`parser_state/0`, `event/0`, `parse_result/0`)
+- `clickhouse_erl_connection.hrl` header for shared connection state record
+- True streaming callbacks with column-name-tagged events via `on_data` query option
+- User-controlled result finalization via `'end'` event in streaming callback
+- `initial_accumulator` query option for streaming mode state management
+- Compression support in block parser (LZ4, ZSTD) — decompresses inline after temp table name
+- Complex/composite type support in block parser: Nullable, Array, Tuple, Map, LowCardinality (column-level decoding)
+- `LowCardinality(Nullable(T))` wire format support — dictionary index 0 maps to `null`, Nullable wrapper stripped for dictionary decoding
+
+### Changed
+- Connection module rewritten to use event-driven parser — TCP data flows through `clickhouse_erl_parser:parse/2`, events processed via tail-recursive `process_events_loop/5`
+- Streaming mode callback signature: `fun({data, #{name => ColName, value => Value}}, Acc) -> {ok, NewAcc}; ('end', Acc) -> {ok, FinalAcc} end`
+- Streaming mode result format: `#{data => FinalAccumulator}`
+- Parser manages its own internal buffer — no connection-level buffer or double buffering
+- All 11 parser modules implement `-behaviour(clickhouse_erl_parser_behaviour)`
+- Connection module event processing uses explicit tail recursion (`process_events_loop/5`, `process_single_event/5`) instead of `lists:foldl` + `throw`
+- Extracted helper functions in connection module: `finalize_streaming_end/1`, `accumulate_exception_field/3`, `dispatch_column_value/5`, `invoke_streaming_callback/6`, `receive_pong_data/2`, `handle_pong_tcp_data/3`
+- Refactored `clickhouse_erl_exception` to extract `format_stack_trace_suffix/1` and `is_schema_error_code/1` helpers
+- Refactored `clickhouse_erl_protocol_data_block` to merge custom serialization check into `maybe_consume_custom_flag/3` (DRY fix)
+- IPv4 encode/decode uses little-endian byte order to match ClickHouse wire format
+- `clickhouse_erl_protocol_server_hello:parse/1` now returns `{ok, Info, Rest}` 3-tuple with unconsumed bytes
+
+### Removed
+- `clickhouse_erl_response_handler` module (replaced by event-driven parser)
+- `clickhouse_erl_callback_event_adapter` module (streaming callbacks are now direct)
+- `get_default_on_data_callback` (batch mode uses existing column accumulation path)
+- ~718 lines of dead code from connection module: `parse_packet_stream`, `parse_packet_data`, `process_handler_result`, `packet_type_name`, `propagate_exception_to_queries`, `update_state_if_not_cancelled`, `cancel_timer_and_reply_ok`, `is_truncated_data_error`, `handle_packet_error`
+- `handler_state` field from `active_query_state()` type
+- Connection-level `buffer` and `parsing_state` fields (parser manages buffer internally)
+- Test files: `clickhouse_erl_response_handler_tests`, `prop_clickhouse_erl_response_handler`, `clickhouse_erl_response_handler_event_processing_tests`, `clickhouse_erl_response_handler_state_machine_tests`, `prop_clickhouse_erl_response_handler_state_machine`, `clickhouse_erl_packet_buffering_tests`, `clickhouse_erl_connection_packet_boundary_tests`, `clickhouse_erl_profile_events_parsing_tests`
+- Dead properties from `prop_clickhouse_erl_connection_streaming`
+- Dead test helpers from `clickhouse_erl_connection_tests`
+
 ## [0.1.0](https://github.com/couchemar/clickhouse_erl/releases/tag/v0.1.0) - 2026-02-28
 
 Initial public release.
@@ -35,7 +72,7 @@ Initial public release.
 #### Architecture
 - OTP behaviors (gen_server, supervisor) for fault tolerance
 - Supervision tree with connection isolation
-- Response handler for streaming
+- Event-driven streaming parser (`clickhouse_erl_parser` + `src/parsers/`)
 - Query manager for request coordination
 - Compression engine with CityHash128 checksum verification
 

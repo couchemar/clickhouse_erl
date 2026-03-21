@@ -121,57 +121,25 @@ decode_columns_loop(Binary, 0, _NumRows, Acc, BlockInfo, _ProtocolVersion) ->
         rows => _NumRows,
         column_data => lists:reverse(Acc)
     },
+    ?LOG_DEBUG("decode_columns_loop: All columns decoded, ~p bytes remaining~n", [
+        byte_size(Binary)
+    ]),
     {ok, DataBlock, Binary};
 decode_columns_loop(Binary, RemColumns, NumRows, Acc, BlockInfo, ProtocolVersion) ->
+    InitialSize = byte_size(Binary),
+    ?LOG_DEBUG(
+        "decode_columns_loop: Decoding column ~p of ~p, ~p bytes available~n",
+        [length(Acc) + 1, length(Acc) + RemColumns, InitialSize]
+    ),
     %% Decode one column: Name, Type, Data
     maybe
         {ok, Name, Rest1} ?= clickhouse_erl_types_primitive:decode_string(Binary),
+        NameBytes = InitialSize - byte_size(Rest1),
+        ?LOG_DEBUG("  Column name: ~s (~p bytes)~n", [Name, NameBytes]),
         {ok, Type, Rest2} ?= clickhouse_erl_types_primitive:decode_string(Rest1),
-        case
-            clickhouse_erl_protocol_features:has_feature(
-                custom_serialization, ProtocolVersion
-            )
-        of
-            true ->
-                handle_custom_serialization(
-                    Name, Type, NumRows, Rest2, RemColumns, Acc, BlockInfo, ProtocolVersion
-                );
-            false ->
-                decode_column_data_and_continue(
-                    Name,
-                    Type,
-                    NumRows,
-                    Rest2,
-                    RemColumns,
-                    Acc,
-                    BlockInfo,
-                    ProtocolVersion
-                )
-        end
-    else
-        {error, Reason} -> {error, Reason}
-    end.
-
-%% @doc Handle custom serialization flag for a column.
--spec handle_custom_serialization(
-    binary(),
-    binary(),
-    non_neg_integer(),
-    binary(),
-    pos_integer(),
-    [column_data()],
-    block_info(),
-    non_neg_integer()
-) ->
-    {ok, data_block(), binary()} | {error, term()}.
-handle_custom_serialization(
-    Name, Type, NumRows, Rest2, RemColumns, Acc, BlockInfo, ProtocolVersion
-) ->
-    maybe
-        {ok, {CustomFlag, Rest3}} ?= extract_custom_flag(Rest2),
-        ?LOG_DEBUG("Column ~s has custom serialization flag: ~p~n", [
-            Name, CustomFlag
-        ]),
+        TypeBytes = byte_size(Rest1) - byte_size(Rest2),
+        ?LOG_DEBUG("  Column type: ~s (~p bytes)~n", [Type, TypeBytes]),
+        {ok, Rest3} ?= maybe_consume_custom_flag(Name, Rest2, ProtocolVersion),
         decode_column_data_and_continue(
             Name,
             Type,
@@ -180,10 +148,33 @@ handle_custom_serialization(
             RemColumns,
             Acc,
             BlockInfo,
-            ProtocolVersion
+            ProtocolVersion,
+            InitialSize
         )
     else
-        {error, _} -> {error, {decoding_failed, {missing_custom_serialization_flag, Name}}}
+        {error, Reason} -> {error, Reason}
+    end.
+
+%% @doc Optionally consume the custom serialization flag byte for a column.
+%% If the feature is supported, reads and discards the flag byte.
+%% Otherwise returns the data unchanged.
+-spec maybe_consume_custom_flag(binary(), binary(), non_neg_integer()) ->
+    {ok, binary()} | {error, term()}.
+maybe_consume_custom_flag(Name, Data, ProtocolVersion) ->
+    case clickhouse_erl_protocol_features:has_feature(custom_serialization, ProtocolVersion) of
+        true ->
+            case extract_custom_flag(Data) of
+                {ok, {CustomFlag, Rest}} ->
+                    FlagBytes = byte_size(Data) - byte_size(Rest),
+                    ?LOG_DEBUG("  Custom serialization flag: ~p (~p bytes)~n", [
+                        CustomFlag, FlagBytes
+                    ]),
+                    {ok, Rest};
+                {error, _} ->
+                    {error, {decoding_failed, {missing_custom_serialization_flag, Name}}}
+            end;
+        false ->
+            {ok, Data}
     end.
 
 %% @doc Extract custom serialization flag from binary.
@@ -202,14 +193,17 @@ extract_custom_flag(_) ->
     pos_integer(),
     [column_data()],
     block_info(),
+    non_neg_integer(),
     non_neg_integer()
 ) ->
     {ok, data_block(), binary()} | {error, term()}.
 decode_column_data_and_continue(
-    Name, Type, NumRows, Rest, RemColumns, Acc, BlockInfo, ProtocolVersion
+    Name, Type, NumRows, Rest, RemColumns, Acc, BlockInfo, ProtocolVersion, InitialSize
 ) ->
+    DataStartSize = byte_size(Rest),
     case NumRows of
         0 ->
+            ?LOG_DEBUG("  Column data: 0 rows, 0 bytes~n", []),
             continue_with_column_data(
                 Name, Type, [], Rest, RemColumns, NumRows, Acc, BlockInfo, ProtocolVersion
             );
@@ -217,8 +211,19 @@ decode_column_data_and_continue(
             %% Decode state if the type requires it (like JSON)
             case decode_column_state(Type, Rest) of
                 {ok, Rest2} ->
+                    StateBytes = DataStartSize - byte_size(Rest2),
+                    case StateBytes of
+                        0 -> ok;
+                        _ -> ?LOG_DEBUG("  Column state: ~p bytes~n", [StateBytes])
+                    end,
+
                     case decode_column_data(Type, NumRows, Rest2) of
                         {ok, Data, Rest3} ->
+                            DataBytes = byte_size(Rest2) - byte_size(Rest3),
+                            TotalBytes = InitialSize - byte_size(Rest3),
+                            ?LOG_DEBUG("  Column data: ~p bytes (total column: ~p bytes)~n", [
+                                DataBytes, TotalBytes
+                            ]),
                             continue_with_column_data(
                                 Name,
                                 Type,
@@ -442,7 +447,15 @@ decode_column_data(<<"LowCardinality(", _/binary>> = Type, NumRows, Binary) ->
     InnerType = clickhouse_erl_types_low_cardinality:parse_low_cardinality_type(Type),
     clickhouse_erl_types_low_cardinality:decode_low_cardinality_column(Binary, InnerType, NumRows);
 decode_column_data(Type, _NumRows, _Binary) ->
-    {error, {unknown_column_type, Type}}.
+    %% Truncate type for logging (show first 50 bytes max)
+    TruncatedType =
+        case byte_size(Type) of
+            Size when Size =< 50 -> Type;
+            _ ->
+                <<First50:50/binary, _/binary>> = Type,
+                <<First50/binary, "...">>
+        end,
+    {error, {unknown_column_type, TruncatedType}}.
 
 decode_fixed_width_integers(0, _Size, _Signedness, _Endianness, Binary, Acc) ->
     {ok, lists:reverse(Acc), Binary};

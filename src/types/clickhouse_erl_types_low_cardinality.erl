@@ -306,7 +306,19 @@ key_type_to_code(uint64) -> ?KEY_TYPE_UINT64.
     binary(), clickhouse_erl_types_composite:column_type(), non_neg_integer()
 ) ->
     {ok, [term()], binary()} | {error, term()}.
+decode_low_cardinality_column(Binary, _InnerType, 0) ->
+    %% RowCount=0: no state version or column data is sent.
+    %% ClickHouse only sends LowCardinality state/data when rows > 0.
+    %% Matches ch-go DecodeColumn: "if rows == 0 { return nil }"
+    {ok, [], Binary};
 decode_low_cardinality_column(Binary, InnerType, RowCount) ->
+    %% For LowCardinality(Nullable(T)), the dictionary is encoded as T (not Nullable(T)).
+    %% Null is represented by dictionary index 0. Strip the Nullable wrapper for decoding.
+    {IsNullable, DictType} =
+        case InnerType of
+            {nullable, ActualType} -> {true, ActualType};
+            _ -> {false, InnerType}
+        end,
     maybe
         %% Decode and validate state version
         {ok, 1, RestAfterState} ?= clickhouse_erl_types_integer:decode_int64(Binary),
@@ -317,14 +329,14 @@ decode_low_cardinality_column(Binary, InnerType, RowCount) ->
             ),
         KeyTypeCode = Meta band ?CARDINALITY_KEY_MASK,
         {ok, KeyType} ?= code_to_key_type(KeyTypeCode),
-        %% Decode dictionary
+        %% Decode dictionary using unwrapped type
         {ok, DictSize, RestAfterDictSize} ?=
             clickhouse_erl_types_integer:decode_int64(
                 RestAfterMetadata
             ),
         {ok, Dictionary, RestAfterDict} ?=
             decode_dictionary_column(
-                RestAfterDictSize, InnerType, DictSize
+                RestAfterDictSize, DictType, DictSize
             ),
         %% Decode keys
         {ok, KeysSize, RestAfterKeysSize} ?=
@@ -333,8 +345,8 @@ decode_low_cardinality_column(Binary, InnerType, RowCount) ->
             ),
         true ?= (KeysSize =:= RowCount),
         {ok, Keys, Rest} ?= decode_keys_column(RestAfterKeysSize, KeyType, KeysSize),
-        %% Lookup values
-        {ok, Values} ?= lookup_values(Keys, Dictionary),
+        %% Lookup values, applying null for index 0 when Nullable
+        {ok, Values} ?= lookup_values_nullable(Keys, Dictionary, IsNullable),
         {ok, Values, Rest}
     else
         {ok, BadVersion, _} when BadVersion =/= 1 ->
@@ -381,20 +393,26 @@ decode_low_cardinality_column(Binary, InnerType, RowCount) ->
 ) ->
     {ok, [term()], binary()} | {error, term()}.
 decode_low_cardinality_column_nested(Binary, InnerType, RowCount) ->
+    %% Same Nullable handling as decode_low_cardinality_column/3
+    {IsNullable, DictType} =
+        case InnerType of
+            {nullable, ActualType} -> {true, ActualType};
+            _ -> {false, InnerType}
+        end,
     maybe
         %% Decode metadata and extract key type (no state version in nested context)
         {ok, Meta, RestAfterMetadata} ?=
             clickhouse_erl_types_integer:decode_int64(Binary),
         KeyTypeCode = Meta band ?CARDINALITY_KEY_MASK,
         {ok, KeyType} ?= code_to_key_type(KeyTypeCode),
-        %% Decode dictionary
+        %% Decode dictionary using unwrapped type
         {ok, DictSize, RestAfterDictSize} ?=
             clickhouse_erl_types_integer:decode_int64(
                 RestAfterMetadata
             ),
         {ok, Dictionary, RestAfterDict} ?=
             decode_dictionary_column(
-                RestAfterDictSize, InnerType, DictSize
+                RestAfterDictSize, DictType, DictSize
             ),
         %% Decode keys
         {ok, KeysSize, RestAfterKeysSize} ?=
@@ -403,8 +421,8 @@ decode_low_cardinality_column_nested(Binary, InnerType, RowCount) ->
             ),
         true ?= (KeysSize =:= RowCount),
         {ok, Keys, Rest} ?= decode_keys_column(RestAfterKeysSize, KeyType, KeysSize),
-        %% Lookup values
-        {ok, Values} ?= lookup_values(Keys, Dictionary),
+        %% Lookup values, applying null for index 0 when Nullable
+        {ok, Values} ?= lookup_values_nullable(Keys, Dictionary, IsNullable),
         {ok, Values, Rest}
     else
         {error, _} = Error ->
@@ -487,6 +505,34 @@ decode_keys_column(Binary, uint64, KeysSize) ->
                 }}}
     end.
 
+%% @doc Lookup dictionary values using keys, with Nullable support.
+%%
+%% When IsNullable is true, dictionary index 0 maps to null.
+%% When IsNullable is false, delegates to lookup_values/2.
+-spec lookup_values_nullable([non_neg_integer()], [term()], boolean()) ->
+    {ok, [term()]} | {error, term()}.
+lookup_values_nullable(Keys, Dictionary, false) ->
+    lookup_values(Keys, Dictionary);
+lookup_values_nullable(Keys, Dictionary, true) ->
+    DictSize = length(Dictionary),
+    lookup_values_nullable_fold(Keys, Dictionary, DictSize, []).
+
+%% @doc Helper for nullable lookup - index 0 maps to null.
+-spec lookup_values_nullable_fold([non_neg_integer()], [term()], non_neg_integer(), [term()]) ->
+    {ok, [term()]} | {error, term()}.
+lookup_values_nullable_fold([], _Dictionary, _DictSize, Acc) ->
+    {ok, lists:reverse(Acc)};
+lookup_values_nullable_fold([0 | Rest], Dictionary, DictSize, Acc) ->
+    lookup_values_nullable_fold(Rest, Dictionary, DictSize, [null | Acc]);
+lookup_values_nullable_fold([Key | Rest], Dictionary, DictSize, Acc) ->
+    case Key < DictSize of
+        true ->
+            Value = lists:nth(Key + 1, Dictionary),
+            lookup_values_nullable_fold(Rest, Dictionary, DictSize, [Value | Acc]);
+        false ->
+            {error, {dictionary_index_out_of_range, Key, DictSize}}
+    end.
+
 %% @doc Lookup dictionary values using keys (indexes).
 -spec lookup_values([non_neg_integer()], [term()]) -> {ok, [term()]} | {error, term()}.
 lookup_values(Keys, Dictionary) ->
@@ -555,6 +601,8 @@ type_to_binary({array, ElemType}) ->
     <<"Array(", (type_to_binary(ElemType))/binary, ")">>;
 type_to_binary({map, KeyType, ValueType}) ->
     <<"Map(", (type_to_binary(KeyType))/binary, ", ", (type_to_binary(ValueType))/binary, ")">>;
+type_to_binary({nullable, InnerType}) ->
+    <<"Nullable(", (type_to_binary(InnerType))/binary, ")">>;
 type_to_binary(Type) ->
     %% Fallback for unknown types
     atom_to_binary(Type).
