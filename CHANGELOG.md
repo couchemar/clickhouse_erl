@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0](https://github.com/couchemar/clickhouse_erl/releases/tag/v0.2.0) - 2026-03-21
 
 ### Added
 - Event-driven streaming parser (`clickhouse_erl_parser` + `src/parsers/`) with dedicated modules for all server packet types: SERVER_HELLO, SERVER_DATA, SERVER_EXCEPTION, SERVER_PROGRESS, SERVER_PONG, SERVER_END_OF_STREAM, SERVER_PROFILE, SERVER_LOG, SERVER_TABLE_COLUMNS, SERVER_PART_UUIDS, SERVER_READ_TASK_REQUEST
