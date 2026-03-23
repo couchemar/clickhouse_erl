@@ -29,6 +29,25 @@
     detect_protocol_violations/1
 ]).
 
+-ignore_xref([
+    create_exception_info/5,
+    create_exception_info/6,
+    decode_exception_packet/1,
+    decode_server_hello/1,
+    decode_server_hello/2,
+    detect_protocol_violations/1,
+    get_enhanced_error_info/1,
+    get_error_atom/1,
+    get_error_code_description/1,
+    get_error_description/1,
+    get_exception_summary/1,
+    is_complete_exception/1,
+    validate_exception_packet_format/1,
+    validate_integer_encoding/2,
+    validate_protocol_compliance/1,
+    validate_string_encoding/1
+]).
+
 %% Export types used in public API
 -export_type([
     client_hello_info/0,

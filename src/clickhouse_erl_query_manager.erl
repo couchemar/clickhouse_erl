@@ -46,15 +46,23 @@
     cleanup_query/2,
     get_active_queries/1,
     cleanup_expired_queries/1,
-    notify_query_caller/2,
-    is_query_active/2,
-    get_query_state/2,
-    update_query_state/3,
-    get_query_statistics/1,
-    cancel_query/2,
-    is_cancelled/1,
-    get_query_registry/0,
     normalize_settings/1
+]).
+
+%% Exported for testing only
+-ignore_xref([
+    execute_query/2,
+    start_query/3,
+    is_expired/1,
+    get_query_ref/1,
+    get_caller/1,
+    get_result_accumulator/1,
+    update_result_accumulator/2,
+    track_query/2,
+    untrack_query/2,
+    cleanup_query/2,
+    get_active_queries/1,
+    cleanup_expired_queries/1
 ]).
 
 %% Include protocol definitions
@@ -322,35 +330,6 @@ execute_insert(Connection, _SQL, _Input, _Timeout) ->
         connection => Connection
     }),
     {error, {validation_error, invalid_arguments}}.
-
-%% @doc Cancel an active query
-%% Requirements: 5.4, 5.5 - Add query cancellation capability
--spec cancel_query(QueryRef :: reference(), QueryRegistry :: #{reference() => query_state()}) ->
-    {ok, NewRegistry :: #{reference() => query_state()}}
-    | {error, query_not_found | query_not_active}.
-cancel_query(QueryRef, QueryRegistry) ->
-    case maps:get(QueryRef, QueryRegistry, undefined) of
-        undefined ->
-            {error, query_not_found};
-        QueryState ->
-            case is_query_active(QueryRef, QueryRegistry) of
-                false ->
-                    {error, query_not_active};
-                true ->
-                    %% Send cancellation packet to server
-                    case send_cancellation_packet(QueryState) of
-                        ok ->
-                            %% Update query state to cancelled
-                            CancelledState = QueryState#query_state{
-                                cancelled = true
-                            },
-                            NewRegistry = maps:put(QueryRef, CancelledState, QueryRegistry),
-                            {ok, NewRegistry};
-                        {error, Reason} ->
-                            {error, {cancellation_failed, Reason}}
-                    end
-            end
-    end.
 
 %% @doc Check if a query has been cancelled
 -spec is_cancelled(query_state()) -> boolean().
@@ -695,97 +674,6 @@ map_connection_error({exception_field_truncated, _, _, _} = Reason) ->
     {protocol_error, Reason};
 map_connection_error(Reason) ->
     {connection_error, Reason}.
-
-%% @doc Notify caller about query completion or failure
-%% Requirements: 5.4 - Handle query cleanup and notification
--spec notify_query_caller(query_state(), {ok, term()} | {error, term()}) -> ok.
-notify_query_caller(QueryState, Result) ->
-    {CallerPid, CallerRef} = QueryState#query_state.caller,
-    case is_process_alive(CallerPid) of
-        true ->
-            CallerPid ! {query_result, CallerRef, QueryState#query_state.query_ref, Result},
-            ok;
-        false ->
-            %% Caller process is dead, nothing to notify
-            ok
-    end.
-
-%% @doc Check if a query reference exists in the registry
-%% Requirements: 5.1 - Track active queries
--spec is_query_active(QueryRef :: reference(), QueryRegistry :: #{reference() => query_state()}) ->
-    boolean().
-is_query_active(QueryRef, QueryRegistry) ->
-    maps:is_key(QueryRef, QueryRegistry).
-
-%% @doc Get query state by reference
-%% Requirements: 5.1 - Track active queries
--spec get_query_state(QueryRef :: reference(), QueryRegistry :: #{reference() => query_state()}) ->
-    {ok, query_state()} | {error, query_not_found}.
-get_query_state(QueryRef, QueryRegistry) ->
-    case maps:get(QueryRef, QueryRegistry, undefined) of
-        undefined ->
-            {error, query_not_found};
-        QueryState ->
-            {ok, QueryState}
-    end.
-
-%% @doc Update query state in the registry
-%% Requirements: 5.1, 5.3 - Track and update active queries
--spec update_query_state(
-    QueryRef :: reference(),
-    QueryState :: query_state(),
-    QueryRegistry :: #{reference() => query_state()}
-) ->
-    {ok, NewRegistry :: #{reference() => query_state()}} | {error, query_not_found}.
-update_query_state(QueryRef, NewQueryState, QueryRegistry) ->
-    case maps:is_key(QueryRef, QueryRegistry) of
-        true ->
-            NewRegistry = maps:put(QueryRef, NewQueryState, QueryRegistry),
-            {ok, NewRegistry};
-        false ->
-            {error, query_not_found}
-    end.
-
-%% @doc Get statistics about active queries
-%% Requirements: 5.1 - Track active queries
--spec get_query_statistics(QueryRegistry :: #{reference() => query_state()}) ->
-    #{
-        total_queries => non_neg_integer(),
-        expired_queries => non_neg_integer(),
-        active_queries => non_neg_integer()
-    }.
-get_query_statistics(QueryRegistry) ->
-    TotalQueries = maps:size(QueryRegistry),
-    ExpiredCount = maps:fold(
-        fun(_QueryRef, QueryState, Acc) ->
-            case is_expired(QueryState) of
-                true -> Acc + 1;
-                false -> Acc
-            end
-        end,
-        0,
-        QueryRegistry
-    ),
-    ActiveCount = TotalQueries - ExpiredCount,
-
-    #{
-        total_queries => TotalQueries,
-        expired_queries => ExpiredCount,
-        active_queries => ActiveCount
-    }.
-
-%% @doc Send cancellation packet to server
--spec send_cancellation_packet(query_state()) -> ok | {error, term()}.
-send_cancellation_packet(QueryState) ->
-    {ConnectionPid, _} = get_caller(QueryState),
-    case is_process_alive(ConnectionPid) of
-        true ->
-            %% Send cancellation packet to connection process
-            ConnectionPid ! {cancel_query, QueryState#query_state.query_id},
-            ok;
-        false ->
-            {error, connection_dead}
-    end.
 
 %% @doc Validate INSERT input data
 %% Requirements: 2.1, 2.4 - Validate column names and row counts

@@ -5,12 +5,17 @@
     decode/1,
     decode/2,
     decode_column_data/3,
-    encode_block_info/0,
     encode_blank_data_block_info/0,
     encode_blank_data_block/0,
     encode_data_block/2,
     validate_row_counts/1,
     validate_column_names/1
+]).
+
+-ignore_xref([
+    decode/1,
+    decode/2,
+    encode_blank_data_block/0
 ]).
 
 %% Type exports
@@ -544,27 +549,6 @@ decode_floats(N, 64, little, Binary, Acc) ->
             {error, truncated_data}
     end.
 
-%% @doc Encode BlockInfo structure for data blocks using field-based encoding.
-%%
-%% Format:
-%% 1. Field 1: is_overflows (Bool) = false (0)
-%% 2. Field 2: bucket_num (Int32) = -1 (for data blocks with rows)
-%% 3. End Marker (0)
--spec encode_block_info() -> iolist().
-encode_block_info() ->
-    [
-        %% Field 1: is_overflows = false
-        clickhouse_erl_types_primitive:encode_varint(1),
-        clickhouse_erl_types_integer:encode_bool(false),
-
-        %% Field 2: bucket_num = -1 (for data blocks)
-        clickhouse_erl_types_primitive:encode_varint(2),
-        clickhouse_erl_types_integer:encode_int32(-1),
-
-        %% End Marker
-        clickhouse_erl_types_primitive:encode_varint(0)
-    ].
-
 %% @doc Encode BlockInfo structure for blank blocks (end-of-stream markers).
 %%
 %% Format:
@@ -680,7 +664,16 @@ encode_data_block(Block, ProtocolVersion) ->
         clickhouse_erl_types_primitive:encode_string(""),
 
         %% 2. Block Info
-        encode_block_info(),
+        [
+            %% Field 1: is_overflows = false
+            clickhouse_erl_types_primitive:encode_varint(1),
+            clickhouse_erl_types_integer:encode_bool(false),
+            %% Field 2: bucket_num = -1 (for data blocks)
+            clickhouse_erl_types_primitive:encode_varint(2),
+            clickhouse_erl_types_integer:encode_int32(-1),
+            %% End Marker
+            clickhouse_erl_types_primitive:encode_varint(0)
+        ],
 
         %% 3. Number of Columns
         clickhouse_erl_types_primitive:encode_varint(NumColumns),

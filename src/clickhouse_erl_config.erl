@@ -11,8 +11,7 @@
     get_max_exception_message_size/0,
     get_max_exception_name_size/0,
     get_max_total_exception_size/0,
-    get_max_nested_exception_count/0,
-    get_parsing_limits/0
+    get_max_nested_exception_count/0
 ]).
 
 %% @doc Get maximum exception nesting depth
@@ -44,15 +43,3 @@ get_max_total_exception_size() ->
 -spec get_max_nested_exception_count() -> non_neg_integer().
 get_max_nested_exception_count() ->
     application:get_env(clickhouse_erl, max_nested_exception_count, 50).
-
-%% @doc Get all parsing limits as a map for convenience
--spec get_parsing_limits() -> #{atom() => non_neg_integer()}.
-get_parsing_limits() ->
-    #{
-        max_exception_nesting_depth => get_max_exception_nesting_depth(),
-        max_stack_trace_size => get_max_stack_trace_size(),
-        max_exception_message_size => get_max_exception_message_size(),
-        max_exception_name_size => get_max_exception_name_size(),
-        max_total_exception_size => get_max_total_exception_size(),
-        max_nested_exception_count => get_max_nested_exception_count()
-    }.

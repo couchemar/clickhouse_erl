@@ -102,6 +102,12 @@
     select_key_type/1
 ]).
 
+-ignore_xref([
+    build_dictionary/1,
+    build_key_mapping/2,
+    select_key_type/1
+]).
+
 %% Type definitions
 -type key_type() :: uint8 | uint16 | uint32 | uint64.
 -type low_cardinality_error() ::

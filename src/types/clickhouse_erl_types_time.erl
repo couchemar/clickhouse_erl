@@ -62,14 +62,15 @@
     decode_time/1,
     encode_time64/1,
     decode_time64/1,
-    time_to_seconds/1,
     seconds_to_time/1,
-    time64_to_nanoseconds/1,
     nanoseconds_to_time64/1,
-    encode_time_column/1,
     decode_time_column/2,
-    encode_time64_column/1,
     decode_time64_column/2
+]).
+
+-ignore_xref([
+    seconds_to_time/1,
+    nanoseconds_to_time64/1
 ]).
 
 %% Includes
@@ -185,13 +186,6 @@ decode_time64(Binary) when byte_size(Binary) < 8 ->
 decode_time64(_) ->
     {error, {invalid_time64_binary, #{type => time64}}}.
 
-%% @doc Convert time tuple to seconds since midnight.
--spec time_to_seconds(time_value()) -> non_neg_integer().
-time_to_seconds({Hour, Minute, Second}) ->
-    Hour * 3600 + Minute * 60 + Second;
-time_to_seconds(Seconds) when is_integer(Seconds) ->
-    Seconds.
-
 %% @doc Convert seconds since midnight to time tuple.
 -spec seconds_to_time(non_neg_integer()) -> {0..23, 0..59, 0..59}.
 seconds_to_time(Seconds) ->
@@ -301,21 +295,11 @@ validate_time64_nanoseconds(Nanoseconds) ->
 %%% Column Encoding/Decoding
 %%%===================================================================
 
-%% @doc Encode a column of Time values.
--spec encode_time_column([time_value()]) -> {ok, iolist()} | {error, term()}.
-encode_time_column(Values) ->
-    encode_column_loop(Values, fun encode_time/1, []).
-
 %% @doc Decode a column of Time values.
 -spec decode_time_column(binary(), non_neg_integer()) ->
     {ok, [time_value()], binary()} | {error, term()}.
 decode_time_column(Binary, NumRows) ->
     decode_column_loop(Binary, NumRows, fun decode_time/1, []).
-
-%% @doc Encode a column of Time64 values.
--spec encode_time64_column([time64_value()]) -> {ok, iolist()} | {error, term()}.
-encode_time64_column(Values) ->
-    encode_column_loop(Values, fun encode_time64/1, []).
 
 %% @doc Decode a column of Time64 values.
 -spec decode_time64_column(binary(), non_neg_integer()) ->
@@ -326,19 +310,6 @@ decode_time64_column(Binary, NumRows) ->
 %%%===================================================================
 %%% Internal Helper Functions
 %%%===================================================================
-
-%% @doc Helper to encode a column of values using an encoder function.
--spec encode_column_loop([term()], fun((term()) -> {ok, binary()} | {error, term()}), iolist()) ->
-    {ok, iolist()} | {error, term()}.
-encode_column_loop([], _EncodeFun, Acc) ->
-    {ok, lists:reverse(Acc)};
-encode_column_loop([Value | Rest], EncodeFun, Acc) ->
-    case EncodeFun(Value) of
-        {ok, Encoded} ->
-            encode_column_loop(Rest, EncodeFun, [Encoded | Acc]);
-        {error, Reason} ->
-            {error, Reason}
-    end.
 
 %% @doc Helper to decode a column of values using a decoder function.
 -spec decode_column_loop(

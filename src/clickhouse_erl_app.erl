@@ -12,7 +12,6 @@
 
 %% Public API for connection management
 -export([
-    connect/2,
     connect/3,
     disconnect/1,
     get_connection_info/1,
@@ -20,7 +19,6 @@
     query/3,
     insert/3,
     insert/4,
-    cancel_query/1,
     cancel_query/2
 ]).
 
@@ -42,15 +40,6 @@ stop(_State) ->
 %%%===================================================================
 %%% Public API
 %%%===================================================================
-
-%% @doc Connect to ClickHouse server with default options
--spec connect(Host, Port) -> {ok, Connection} | {error, Reason} when
-    Host :: string() | inet:ip_address(),
-    Port :: inet:port_number(),
-    Connection :: pid(),
-    Reason :: clickhouse_erl_connection:connection_error().
-connect(Host, Port) ->
-    connect(Host, Port, #{}).
 
 %% @doc Connect to ClickHouse server with options
 -spec connect(Host, Port, Options) -> {ok, Connection} | {error, Reason} when
@@ -187,13 +176,6 @@ insert(Connection, SQL, Input, Options) ->
             },
             clickhouse_erl_connection:insert(Connection, PreparedRequest)
     end.
-
-%% @doc Cancel the currently active query
--spec cancel_query(Connection) -> ok | {error, Reason} when
-    Connection :: pid(),
-    Reason :: clickhouse_erl_connection:connection_error() | no_active_query.
-cancel_query(Connection) ->
-    clickhouse_erl_connection:cancel_query(Connection).
 
 %% @doc Cancel an active query by query ID
 -spec cancel_query(Connection, QueryId) -> ok | {error, Reason} when

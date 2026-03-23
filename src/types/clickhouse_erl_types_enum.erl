@@ -57,9 +57,7 @@
 -export([encode_enum16/2, decode_enum16/2]).
 -export([parse_enum_type/1]).
 -export([
-    encode_enum8_column/2,
     decode_enum8_column/3,
-    encode_enum16_column/2,
     decode_enum16_column/3
 ]).
 
@@ -328,21 +326,11 @@ reverse_lookup_enum(IntValue, Mappings) ->
 %%% Column Encoding/Decoding
 %%%===================================================================
 
-%% @doc Encode a column of Enum8 values.
--spec encode_enum8_column([enum_value()], enum_mappings()) -> {ok, iolist()} | {error, term()}.
-encode_enum8_column(Values, Mappings) ->
-    encode_enum_column_loop(Values, Mappings, fun encode_enum8/2, []).
-
 %% @doc Decode a column of Enum8 values.
 -spec decode_enum8_column(binary(), enum_mappings(), non_neg_integer()) ->
     {ok, [enum_value()], binary()} | {error, term()}.
 decode_enum8_column(Binary, Mappings, NumRows) ->
     decode_enum_column_loop(Binary, Mappings, NumRows, fun decode_enum8/2, []).
-
-%% @doc Encode a column of Enum16 values.
--spec encode_enum16_column([enum_value()], enum_mappings()) -> {ok, iolist()} | {error, term()}.
-encode_enum16_column(Values, Mappings) ->
-    encode_enum_column_loop(Values, Mappings, fun encode_enum16/2, []).
 
 %% @doc Decode a column of Enum16 values.
 -spec decode_enum16_column(binary(), enum_mappings(), non_neg_integer()) ->
@@ -353,24 +341,6 @@ decode_enum16_column(Binary, Mappings, NumRows) ->
 %%%===================================================================
 %%% Internal Helper Functions
 %%%===================================================================
-
-%% @doc Helper to encode a column of enum values.
--spec encode_enum_column_loop(
-    [enum_value()],
-    enum_mappings(),
-    fun((enum_value(), enum_mappings()) -> {ok, binary()} | {error, term()}),
-    iolist()
-) ->
-    {ok, iolist()} | {error, term()}.
-encode_enum_column_loop([], _Mappings, _EncodeFun, Acc) ->
-    {ok, lists:reverse(Acc)};
-encode_enum_column_loop([Value | Rest], Mappings, EncodeFun, Acc) ->
-    case EncodeFun(Value, Mappings) of
-        {ok, Encoded} ->
-            encode_enum_column_loop(Rest, Mappings, EncodeFun, [Encoded | Acc]);
-        {error, Reason} ->
-            {error, Reason}
-    end.
 
 %% @doc Helper to decode a column of enum values.
 -spec decode_enum_column_loop(

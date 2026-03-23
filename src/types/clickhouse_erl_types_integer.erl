@@ -17,7 +17,6 @@
     decode_uint16/1,
     encode_uint32/1,
     decode_uint32/1,
-    encode_uint64_internal/1,
     % Signed integers
     encode_int8/1,
     decode_int8/1,
@@ -29,8 +28,7 @@
     decode_int64/1,
     % Boolean
     encode_bool/1,
-    decode_bool/1,
-    check_bool/1
+    decode_bool/1
 ]).
 
 %%%===================================================================
@@ -96,16 +94,6 @@ decode_uint32(Binary) when byte_size(Binary) < 4 ->
         }}};
 decode_uint32(<<Value:32/little-unsigned-integer, Rest/binary>>) ->
     {ok, Value, Rest}.
-
-%% @doc Encode an unsigned 64-bit integer (UInt64) in little-endian format.
-%%
-%% This is an internal function used by column encoders.
-%% Returns an 8-byte binary or error tuple.
--spec encode_uint64_internal(non_neg_integer()) -> binary() | {error, term()}.
-encode_uint64_internal(N) when is_integer(N), N >= 0, N =< 18446744073709551615 ->
-    <<N:64/little-unsigned-integer>>;
-encode_uint64_internal(N) ->
-    {error, {value_out_of_range, #{value => N, type => uint64}}}.
 
 %%%===================================================================
 %%% Signed Integer Encoding/Decoding
@@ -212,7 +200,12 @@ encode_bool(Val) ->
 decode_bool(Binary) ->
     maybe
         {ok, Bool0, Rest} ?= decode_uint8(Binary),
-        {ok, Bool} ?= check_bool(Bool0),
+        {ok, Bool} ?=
+            case Bool0 of
+                0 -> {ok, false};
+                1 -> {ok, true};
+                _ -> {error, {invalid_bool_value, #{value => Bool0, expected_values => [0, 1]}}}
+            end,
         {ok, Bool, Rest}
     else
         {error, {truncated_data, _}} ->
@@ -222,15 +215,4 @@ decode_bool(Binary) ->
                 }}};
         Error ->
             Error
-    end.
-
-%% @doc Check if an integer value is a valid boolean (0 or 1).
-%%
-%% Returns {ok, Boolean} or {error, Reason}.
--spec check_bool(non_neg_integer()) -> {ok, boolean()} | {error, term()}.
-check_bool(Bool) ->
-    case Bool of
-        0 -> {ok, false};
-        1 -> {ok, true};
-        _ -> {error, {invalid_bool_value, #{value => Bool, expected_values => [0, 1]}}}
     end.

@@ -57,6 +57,14 @@
     encode_column/2
 ]).
 
+-ignore_xref([
+    encode_tuple_column/2,
+    encode_array_column/2,
+    encode_map_column/3,
+    encode_nullable_column/2,
+    encode_low_cardinality_column/2
+]).
+
 -include_lib("kernel/include/logger.hrl").
 
 %%%===================================================================

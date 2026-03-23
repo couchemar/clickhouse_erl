@@ -501,6 +501,21 @@
     build_query_result/1
 ]).
 
+-ignore_xref([
+    connect/3,
+    format_error/1,
+    is_compatible_version/1,
+    validate_callback/2,
+    validate_prepared_request/1,
+    invoke_optional_callback/2,
+    validate_parameters/1,
+    should_send_parameters/2,
+    validate_and_normalize_compression_opts/1,
+    init_acc_state/1,
+    process_events/2,
+    build_query_result/1
+]).
+
 %% gen_server callbacks
 -export([
     init/1,

@@ -116,6 +116,8 @@
     validate_type_compatibility/2
 ]).
 
+-ignore_xref([validate_type_compatibility/2]).
+
 %% Type definitions
 -type column_type() ::
     primitive_type()

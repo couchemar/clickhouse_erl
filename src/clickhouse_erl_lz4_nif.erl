@@ -4,7 +4,6 @@
 
 %% API exports
 -export([compress/1, compress_hc/2, decompress/2]).
--export([load/0]).
 
 -on_load(init/0).
 
@@ -27,9 +26,13 @@ compress_hc(_Data, _Level) ->
 decompress(_CompressedData, _OriginalSize) ->
     erlang:nif_error({nif_not_loaded, ?MODULE}).
 
-%% @doc Explicitly load the NIF (called automatically via on_load).
--spec load() -> ok | {error, term()}.
-load() ->
+%%%===================================================================
+%%% Internal functions
+%%%===================================================================
+
+%% @doc Initialize NIF on module load.
+-spec init() -> ok | {error, term()}.
+init() ->
     SoName =
         case code:priv_dir(clickhouse_erl) of
             {error, bad_name} ->
@@ -43,12 +46,3 @@ load() ->
                 filename:join(Dir, clickhouse_erl_lz4_nif)
         end,
     erlang:load_nif(SoName, 0).
-
-%%%===================================================================
-%%% Internal functions
-%%%===================================================================
-
-%% @doc Initialize NIF on module load.
--spec init() -> ok | {error, term()}.
-init() ->
-    load().

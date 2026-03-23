@@ -57,15 +57,7 @@
 -export([
     encode_uuid/1,
     decode_uuid/1,
-    encode_uuid_column/1,
     decode_uuid_column/2
-]).
-
-%% Helper function exports
--export([
-    parse_uuid/1,
-    format_uuid/1,
-    validate_uuid_format/1
 ]).
 
 -include_lib("kernel/include/logger.hrl").
@@ -303,11 +295,6 @@ validate_uuid_binary(Binary) ->
 %%% Column Encoding/Decoding
 %%%===================================================================
 
-%% @doc Encode a column of UUID values.
--spec encode_uuid_column([uuid_value()]) -> {ok, iolist()} | {error, term()}.
-encode_uuid_column(Values) ->
-    encode_column_loop(Values, fun encode_uuid/1, []).
-
 %% @doc Decode a column of UUID values.
 -spec decode_uuid_column(binary(), non_neg_integer()) ->
     {ok, [uuid_value()], binary()} | {error, term()}.
@@ -317,19 +304,6 @@ decode_uuid_column(Binary, NumRows) ->
 %%%===================================================================
 %%% Internal Helper Functions
 %%%===================================================================
-
-%% @doc Helper to encode a column of values using an encoder function.
--spec encode_column_loop([term()], fun((term()) -> {ok, binary()} | {error, term()}), iolist()) ->
-    {ok, iolist()} | {error, term()}.
-encode_column_loop([], _EncodeFun, Acc) ->
-    {ok, lists:reverse(Acc)};
-encode_column_loop([Value | Rest], EncodeFun, Acc) ->
-    case EncodeFun(Value) of
-        {ok, Encoded} ->
-            encode_column_loop(Rest, EncodeFun, [Encoded | Acc]);
-        {error, Reason} ->
-            {error, Reason}
-    end.
 
 %% @doc Helper to decode a column of values using a decoder function.
 -spec decode_column_loop(

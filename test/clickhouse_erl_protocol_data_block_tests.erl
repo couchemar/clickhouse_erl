@@ -42,27 +42,6 @@ decode_empty_block_test() ->
         ?TEST_MODULE:decode(Binary)
     ).
 
-encode_block_info_test() ->
-    %% Field 1: IsOverflows (false)
-    %% Field 2: BucketNum (-1) for data blocks
-    %% End Marker: 0
-    Expected = <<
-        % Field 1 (varint)
-        1,
-        % false (uint8/bool)
-        0,
-        % Field 2 (varint)
-        2,
-        % -1 (int32 little endian) - used for data blocks with rows
-        255,
-        255,
-        255,
-        255,
-        % End marker (varint)
-        0
-    >>,
-    ?assertEqual(Expected, iolist_to_binary(?TEST_MODULE:encode_block_info())).
-
 encode_blank_data_block_test() ->
     %% Structure:
     %% 1. Temp Table Name (empty string) -> 0 length

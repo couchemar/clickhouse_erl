@@ -11,6 +11,8 @@
     get_error/1
 ]).
 
+-ignore_xref([get_readable_error/1]).
+
 %% Export types
 -export_type([error_code/0, error_atom/0, error_description/0]).
 

@@ -59,14 +59,10 @@
     % UInt256
     encode_uint256/1,
     decode_uint256/1,
-    % Column encoding/decoding
-    encode_int128_column/1,
+    % Column decoding
     decode_int128_column/2,
-    encode_uint128_column/1,
     decode_uint128_column/2,
-    encode_int256_column/1,
     decode_int256_column/2,
-    encode_uint256_column/1,
     decode_uint256_column/2
 ]).
 
@@ -255,21 +251,11 @@ decode_uint256(
 %%% Column Encoding/Decoding
 %%%===================================================================
 
-%% @doc Encode a column of Int128 values.
--spec encode_int128_column([integer()]) -> {ok, iolist()} | {error, term()}.
-encode_int128_column(Values) ->
-    encode_column_loop(Values, fun encode_int128/1, []).
-
 %% @doc Decode a column of Int128 values.
 -spec decode_int128_column(binary(), non_neg_integer()) ->
     {ok, [integer()], binary()} | {error, term()}.
 decode_int128_column(Binary, NumRows) ->
     decode_column_loop(Binary, NumRows, fun decode_int128/1, []).
-
-%% @doc Encode a column of UInt128 values.
--spec encode_uint128_column([non_neg_integer()]) -> {ok, iolist()} | {error, term()}.
-encode_uint128_column(Values) ->
-    encode_column_loop(Values, fun encode_uint128/1, []).
 
 %% @doc Decode a column of UInt128 values.
 -spec decode_uint128_column(binary(), non_neg_integer()) ->
@@ -277,21 +263,11 @@ encode_uint128_column(Values) ->
 decode_uint128_column(Binary, NumRows) ->
     decode_column_loop(Binary, NumRows, fun decode_uint128/1, []).
 
-%% @doc Encode a column of Int256 values.
--spec encode_int256_column([integer()]) -> {ok, iolist()} | {error, term()}.
-encode_int256_column(Values) ->
-    encode_column_loop(Values, fun encode_int256/1, []).
-
 %% @doc Decode a column of Int256 values.
 -spec decode_int256_column(binary(), non_neg_integer()) ->
     {ok, [integer()], binary()} | {error, term()}.
 decode_int256_column(Binary, NumRows) ->
     decode_column_loop(Binary, NumRows, fun decode_int256/1, []).
-
-%% @doc Encode a column of UInt256 values.
--spec encode_uint256_column([non_neg_integer()]) -> {ok, iolist()} | {error, term()}.
-encode_uint256_column(Values) ->
-    encode_column_loop(Values, fun encode_uint256/1, []).
 
 %% @doc Decode a column of UInt256 values.
 -spec decode_uint256_column(binary(), non_neg_integer()) ->
@@ -302,19 +278,6 @@ decode_uint256_column(Binary, NumRows) ->
 %%%===================================================================
 %%% Internal Helper Functions
 %%%===================================================================
-
-%% @doc Helper to encode a column of values using an encoder function.
--spec encode_column_loop([term()], fun((term()) -> {ok, binary()} | {error, term()}), iolist()) ->
-    {ok, iolist()} | {error, term()}.
-encode_column_loop([], _EncodeFun, Acc) ->
-    {ok, lists:reverse(Acc)};
-encode_column_loop([Value | Rest], EncodeFun, Acc) ->
-    case EncodeFun(Value) of
-        {ok, Encoded} ->
-            encode_column_loop(Rest, EncodeFun, [Encoded | Acc]);
-        {error, Reason} ->
-            {error, Reason}
-    end.
 
 %% @doc Helper to decode a column of values using a decoder function.
 -spec decode_column_loop(

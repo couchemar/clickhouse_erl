@@ -2,7 +2,7 @@
 -include_lib("kernel/include/logger.hrl").
 -include("clickhouse_erl_protocol.hrl").
 
--export([decode/1, validate_parse_limits/1, get_parse_stats/1]).
+-export([decode/1]).
 -export_type([exception_info/0, parse_state/0]).
 
 %% Internal parse state for tracking limits during decoding
@@ -176,40 +176,3 @@ parse_nested_exceptions(Binary, true, Depth, ParseState) ->
                     {error, Reason, FailedState}
             end
     end.
-
-%% @doc Validate parse limits for exception parsing.
-%%
-%% Performs comprehensive validation of resource usage to prevent
-%% memory exhaustion and ensure safe parsing.
--spec validate_parse_limits(parse_state()) -> ok | {error, term()}.
-validate_parse_limits(ParseState) ->
-    %% Check total memory usage
-    TotalBytes = ParseState#parse_state.total_bytes,
-    MaxTotalSize = clickhouse_erl_config:get_max_total_exception_size(),
-    case TotalBytes > MaxTotalSize of
-        true ->
-            {error, {memory_limit_exceeded, TotalBytes, MaxTotalSize}};
-        false ->
-            %% Check nested exception count
-            NestedCount = ParseState#parse_state.nested_count,
-            MaxNestedCount = clickhouse_erl_config:get_max_nested_exception_count(),
-            case NestedCount > MaxNestedCount of
-                true ->
-                    {error, {too_many_nested_exceptions, NestedCount, MaxNestedCount}};
-                false ->
-                    ok
-            end
-    end.
-
-%% @doc Get current parse statistics.
-%%
-%% Returns a map with current resource usage for monitoring and debugging.
--spec get_parse_stats(parse_state()) -> #{atom() => term()}.
-get_parse_stats(ParseState) ->
-    #{
-        total_bytes => ParseState#parse_state.total_bytes,
-        nested_count => ParseState#parse_state.nested_count,
-        memory_limit => clickhouse_erl_config:get_max_total_exception_size(),
-        nesting_limit => clickhouse_erl_config:get_max_exception_nesting_depth(),
-        nested_count_limit => clickhouse_erl_config:get_max_nested_exception_count()
-    }.

@@ -106,15 +106,16 @@
     encode_json/1,
     decode_json/1,
     decode_json/2,
-    %% Column encoding/decoding
-    encode_nothing_column/1,
+    %% Column decoding
     decode_nothing_column/2,
-    encode_point_column/1,
     decode_point_column/2,
-    encode_interval_column/2,
     decode_interval_column/3,
-    encode_json_column/1,
     decode_json_column/2
+]).
+
+-ignore_xref([
+    decode_json/2,
+    parse_interval_type/1
 ]).
 
 %% Includes
@@ -444,21 +445,11 @@ decode_varint_loop(<<>>, _Acc, _Shift) ->
 %%% Column Encoding/Decoding
 %%%===================================================================
 
-%% @doc Encode a column of Nothing values.
--spec encode_nothing_column([term()]) -> {ok, iolist()} | {error, term()}.
-encode_nothing_column(Values) ->
-    encode_column_loop(Values, fun encode_nothing/1, []).
-
 %% @doc Decode a column of Nothing values.
 -spec decode_nothing_column(binary(), non_neg_integer()) ->
     {ok, [term()], binary()} | {error, term()}.
 decode_nothing_column(Binary, NumRows) ->
     decode_column_loop(Binary, NumRows, fun decode_nothing/1, []).
-
-%% @doc Encode a column of Point values.
--spec encode_point_column([point_value()]) -> {ok, iolist()} | {error, term()}.
-encode_point_column(Values) ->
-    encode_column_loop(Values, fun encode_point/1, []).
 
 %% @doc Decode a column of Point values.
 -spec decode_point_column(binary(), non_neg_integer()) ->
@@ -466,22 +457,11 @@ encode_point_column(Values) ->
 decode_point_column(Binary, NumRows) ->
     decode_column_loop(Binary, NumRows, fun decode_point/1, []).
 
-%% @doc Encode a column of Interval values.
--spec encode_interval_column([interval_value()], interval_scale()) ->
-    {ok, iolist()} | {error, term()}.
-encode_interval_column(Values, Scale) ->
-    encode_interval_column_loop(Values, Scale, []).
-
 %% @doc Decode a column of Interval values.
 -spec decode_interval_column(binary(), interval_scale(), non_neg_integer()) ->
     {ok, [interval_value()], binary()} | {error, term()}.
 decode_interval_column(Binary, Scale, NumRows) ->
     decode_interval_column_loop(Binary, Scale, NumRows, []).
-
-%% @doc Encode a column of JSON values.
--spec encode_json_column([json_value()]) -> {ok, iolist()} | {error, term()}.
-encode_json_column(Values) ->
-    encode_column_loop(Values, fun encode_json/1, []).
 
 %% @doc Decode a column of JSON values.
 -spec decode_json_column(binary(), non_neg_integer()) ->
@@ -492,19 +472,6 @@ decode_json_column(Binary, NumRows) ->
 %%%===================================================================
 %%% Internal Helper Functions
 %%%===================================================================
-
-%% @doc Helper to encode a column of values using an encoder function.
--spec encode_column_loop([term()], fun((term()) -> {ok, binary()} | {error, term()}), iolist()) ->
-    {ok, iolist()} | {error, term()}.
-encode_column_loop([], _EncodeFun, Acc) ->
-    {ok, lists:reverse(Acc)};
-encode_column_loop([Value | Rest], EncodeFun, Acc) ->
-    case EncodeFun(Value) of
-        {ok, Encoded} ->
-            encode_column_loop(Rest, EncodeFun, [Encoded | Acc]);
-        {error, Reason} ->
-            {error, Reason}
-    end.
 
 %% @doc Helper to decode a column of values using a decoder function.
 -spec decode_column_loop(
@@ -520,19 +487,6 @@ decode_column_loop(Binary, N, DecodeFun, Acc) ->
     case DecodeFun(Binary) of
         {ok, Value, Rest} ->
             decode_column_loop(Rest, N - 1, DecodeFun, [Value | Acc]);
-        {error, Reason} ->
-            {error, Reason}
-    end.
-
-%% @doc Helper to encode a column of interval values with scale.
--spec encode_interval_column_loop([interval_value()], interval_scale(), iolist()) ->
-    {ok, iolist()} | {error, term()}.
-encode_interval_column_loop([], _Scale, Acc) ->
-    {ok, lists:reverse(Acc)};
-encode_interval_column_loop([Value | Rest], Scale, Acc) ->
-    case encode_interval(Value, Scale) of
-        {ok, Encoded} ->
-            encode_interval_column_loop(Rest, Scale, [Encoded | Acc]);
         {error, Reason} ->
             {error, Reason}
     end.

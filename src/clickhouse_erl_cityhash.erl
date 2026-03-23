@@ -101,6 +101,8 @@
 %% API exports
 -export([hash128/1, verify/2, encode_hash/2, decode_hash/1, ch64/1]).
 
+-ignore_xref([ch64/1, decode_hash/1, encode_hash/2, verify/2]).
+
 -include_lib("kernel/include/logger.hrl").
 
 %% Constants from CityHash

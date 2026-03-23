@@ -22,6 +22,25 @@
     is_schema_error/1
 ]).
 
+-ignore_xref([
+    to_map/1,
+    is_exception/1,
+    get_code/1,
+    get_name/1,
+    get_message/1,
+    get_stack_trace/1,
+    flatten/1,
+    compare/2,
+    match_code/2,
+    match_name/2,
+    match_message/2,
+    has_nested/1,
+    count_nested/1,
+    find_by_code/2,
+    find_by_name/2,
+    is_schema_error/1
+]).
+
 -export_type([exception_info/0]).
 
 %% @doc Format an exception into a human-readable binary.

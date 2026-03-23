@@ -3,6 +3,8 @@
 %% Public API
 -export([encode/1, encode/2, decode/2, generate_query_id/1]).
 
+-ignore_xref([encode/1, decode/2, generate_query_id/1]).
+
 %% Export types
 -export_type([query_info/0]).
 

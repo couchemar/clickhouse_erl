@@ -81,6 +81,23 @@
     stop/0
 ]).
 
+%% Public API - suppress xref warnings (called by library consumers)
+-ignore_xref([
+    connect/2,
+    connect/3,
+    disconnect/1,
+    get_connection_info/1,
+    format_error/1,
+    query/2,
+    query/3,
+    insert/3,
+    insert/4,
+    cancel_query/1,
+    cancel_query/2,
+    start/0,
+    stop/0
+]).
+
 %% Re-export types for convenience
 -export_type([
     connection_options/0,

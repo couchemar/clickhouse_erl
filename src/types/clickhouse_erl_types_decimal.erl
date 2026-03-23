@@ -59,14 +59,10 @@
     encode_decimal256/2,
     decode_decimal256/2,
     parse_decimal_type/1,
-    % Column encoding/decoding
-    encode_decimal32_column/2,
+    % Column decoding
     decode_decimal32_column/3,
-    encode_decimal64_column/2,
     decode_decimal64_column/3,
-    encode_decimal128_column/2,
     decode_decimal128_column/3,
-    encode_decimal256_column/2,
     decode_decimal256_column/3
 ]).
 
@@ -431,23 +427,11 @@ parse_generic_decimal_params(Rest) ->
 %%% Column Encoding/Decoding
 %%%===================================================================
 
-%% @doc Encode a column of Decimal32 values.
--spec encode_decimal32_column([decimal_value()], non_neg_integer()) ->
-    {ok, iolist()} | {error, term()}.
-encode_decimal32_column(Values, Scale) ->
-    encode_decimal_column_loop(Values, Scale, fun encode_decimal32/2, []).
-
 %% @doc Decode a column of Decimal32 values.
 -spec decode_decimal32_column(binary(), non_neg_integer(), non_neg_integer()) ->
     {ok, [decimal_value()], binary()} | {error, term()}.
 decode_decimal32_column(Binary, Scale, NumRows) ->
     decode_decimal_column_loop(Binary, Scale, NumRows, fun decode_decimal32/2, []).
-
-%% @doc Encode a column of Decimal64 values.
--spec encode_decimal64_column([decimal_value()], non_neg_integer()) ->
-    {ok, iolist()} | {error, term()}.
-encode_decimal64_column(Values, Scale) ->
-    encode_decimal_column_loop(Values, Scale, fun encode_decimal64/2, []).
 
 %% @doc Decode a column of Decimal64 values.
 -spec decode_decimal64_column(binary(), non_neg_integer(), non_neg_integer()) ->
@@ -455,23 +439,11 @@ encode_decimal64_column(Values, Scale) ->
 decode_decimal64_column(Binary, Scale, NumRows) ->
     decode_decimal_column_loop(Binary, Scale, NumRows, fun decode_decimal64/2, []).
 
-%% @doc Encode a column of Decimal128 values.
--spec encode_decimal128_column([decimal_value()], non_neg_integer()) ->
-    {ok, iolist()} | {error, term()}.
-encode_decimal128_column(Values, Scale) ->
-    encode_decimal_column_loop(Values, Scale, fun encode_decimal128/2, []).
-
 %% @doc Decode a column of Decimal128 values.
 -spec decode_decimal128_column(binary(), non_neg_integer(), non_neg_integer()) ->
     {ok, [decimal_value()], binary()} | {error, term()}.
 decode_decimal128_column(Binary, Scale, NumRows) ->
     decode_decimal_column_loop(Binary, Scale, NumRows, fun decode_decimal128/2, []).
-
-%% @doc Encode a column of Decimal256 values.
--spec encode_decimal256_column([decimal_value()], non_neg_integer()) ->
-    {ok, iolist()} | {error, term()}.
-encode_decimal256_column(Values, Scale) ->
-    encode_decimal_column_loop(Values, Scale, fun encode_decimal256/2, []).
 
 %% @doc Decode a column of Decimal256 values.
 -spec decode_decimal256_column(binary(), non_neg_integer(), non_neg_integer()) ->
@@ -482,24 +454,6 @@ decode_decimal256_column(Binary, Scale, NumRows) ->
 %%%===================================================================
 %%% Internal Helper Functions
 %%%===================================================================
-
-%% @doc Helper to encode a column of decimal values.
--spec encode_decimal_column_loop(
-    [decimal_value()],
-    non_neg_integer(),
-    fun((decimal_value(), non_neg_integer()) -> {ok, binary()} | {error, term()}),
-    iolist()
-) ->
-    {ok, iolist()} | {error, term()}.
-encode_decimal_column_loop([], _Scale, _EncodeFun, Acc) ->
-    {ok, lists:reverse(Acc)};
-encode_decimal_column_loop([Value | Rest], Scale, EncodeFun, Acc) ->
-    case EncodeFun(Value, Scale) of
-        {ok, Encoded} ->
-            encode_decimal_column_loop(Rest, Scale, EncodeFun, [Encoded | Acc]);
-        {error, Reason} ->
-            {error, Reason}
-    end.
 
 %% @doc Helper to decode a column of decimal values.
 -spec decode_decimal_column_loop(

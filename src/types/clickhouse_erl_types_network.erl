@@ -64,18 +64,19 @@
     decode_ipv4/1,
     encode_ipv6/1,
     decode_ipv6/1,
-    encode_ipv4_column/1,
     decode_ipv4_column/2,
-    encode_ipv6_column/1,
     decode_ipv6_column/2
 ]).
 
-%% Helper function exports
+%% Helper function exports (used by tests)
 -export([
     parse_ipv4/1,
-    format_ipv4/1,
-    parse_ipv6/1,
-    format_ipv6/1
+    parse_ipv6/1
+]).
+
+-ignore_xref([
+    parse_ipv4/1,
+    parse_ipv6/1
 ]).
 
 -include_lib("kernel/include/logger.hrl").
@@ -240,13 +241,6 @@ parse_ipv4(Binary) when is_binary(Binary) ->
             {error, {invalid_ipv4_string, Binary}}
     end.
 
-%% @doc Format an IPv4 tuple to string representation.
-%%
-%% Converts {192, 168, 1, 1} to <<"192.168.1.1">>.
--spec format_ipv4(ipv4_tuple()) -> binary().
-format_ipv4({A, B, C, D}) ->
-    iolist_to_binary(io_lib:format("~B.~B.~B.~B", [A, B, C, D])).
-
 %%%===================================================================
 %%% Helper Functions - IPv6
 %%%===================================================================
@@ -262,26 +256,6 @@ parse_ipv6(Binary) when is_binary(Binary) ->
             {ok, {A, B, C, D, E, F, G, H}};
         {error, einval} ->
             {error, {invalid_ipv6_string, Binary}}
-    end.
-
-%% @doc Format an IPv6 tuple to string representation.
-%%
-%% Converts {8193, 3512, 0, 0, 0, 0, 0, 1} to <<"2001:db8::1">>.
-%% Uses :: compression for consecutive zero segments.
--spec format_ipv6(ipv6_tuple()) -> binary().
-format_ipv6({A, B, C, D, E, F, G, H}) ->
-    Address = {A, B, C, D, E, F, G, H},
-    case inet:ntoa(Address) of
-        String when is_list(String) ->
-            list_to_binary(String);
-        {error, einval} ->
-            %% Fallback to manual formatting without compression
-            iolist_to_binary(
-                io_lib:format(
-                    "~4.16.0B:~4.16.0B:~4.16.0B:~4.16.0B:~4.16.0B:~4.16.0B:~4.16.0B:~4.16.0B",
-                    [A, B, C, D, E, F, G, H]
-                )
-            )
     end.
 
 %%%===================================================================
@@ -341,21 +315,11 @@ in_segment_range(_) -> false.
 %%% Column Encoding/Decoding
 %%%===================================================================
 
-%% @doc Encode a column of IPv4 values.
--spec encode_ipv4_column([ipv4_value()]) -> {ok, iolist()} | {error, term()}.
-encode_ipv4_column(Values) ->
-    encode_column_loop(Values, fun encode_ipv4/1, []).
-
 %% @doc Decode a column of IPv4 values.
 -spec decode_ipv4_column(binary(), non_neg_integer()) ->
     {ok, [ipv4_value()], binary()} | {error, term()}.
 decode_ipv4_column(Binary, NumRows) ->
     decode_column_loop(Binary, NumRows, fun decode_ipv4/1, []).
-
-%% @doc Encode a column of IPv6 values.
--spec encode_ipv6_column([ipv6_value()]) -> {ok, iolist()} | {error, term()}.
-encode_ipv6_column(Values) ->
-    encode_column_loop(Values, fun encode_ipv6/1, []).
 
 %% @doc Decode a column of IPv6 values.
 -spec decode_ipv6_column(binary(), non_neg_integer()) ->
@@ -366,19 +330,6 @@ decode_ipv6_column(Binary, NumRows) ->
 %%%===================================================================
 %%% Internal Helper Functions
 %%%===================================================================
-
-%% @doc Helper to encode a column of values using an encoder function.
--spec encode_column_loop([term()], fun((term()) -> {ok, binary()} | {error, term()}), iolist()) ->
-    {ok, iolist()} | {error, term()}.
-encode_column_loop([], _EncodeFun, Acc) ->
-    {ok, lists:reverse(Acc)};
-encode_column_loop([Value | Rest], EncodeFun, Acc) ->
-    case EncodeFun(Value) of
-        {ok, Encoded} ->
-            encode_column_loop(Rest, EncodeFun, [Encoded | Acc]);
-        {error, Reason} ->
-            {error, Reason}
-    end.
 
 %% @doc Helper to decode a column of values using a decoder function.
 -spec decode_column_loop(

@@ -18,6 +18,8 @@
     stop_connection/1
 ]).
 
+-ignore_xref([start_link/0]).
+
 %% supervisor callbacks
 -export([init/1]).
 

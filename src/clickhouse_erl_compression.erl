@@ -122,14 +122,23 @@
     validate_opts/1,
     is_available/1,
     compress_lz4/2,
-    decompress_lz4/2,
     compress_zstd/1,
-    decompress_zstd/2,
     compress_none/1,
     decompress_none/2,
     encode_header/3,
     decode_header/1,
     compress_data_block/2
+]).
+
+-ignore_xref([
+    compress/2,
+    compress_lz4/2,
+    compress_none/1,
+    compress_zstd/1,
+    decompress_none/2,
+    encode_header/3,
+    decode_header/1,
+    is_available/1
 ]).
 
 %% Includes

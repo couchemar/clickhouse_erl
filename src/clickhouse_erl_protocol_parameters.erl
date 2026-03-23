@@ -2,6 +2,8 @@
 
 -export([decode/1, encode/1, encode_parameter/1, encode_parameters/1]).
 
+-ignore_xref([encode/1, encode_parameter/1]).
+
 -export_type([parameter/0, parameter_list/0]).
 
 -type parameter() :: {Key :: binary(), Value :: binary()}.

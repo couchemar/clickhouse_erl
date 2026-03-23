@@ -8,32 +8,11 @@
 %% Public API
 -export([
     has_feature/2,
-    feature_version/1,
+    feature_version/1
+]).
 
-    % Feature names for convenience
-    feature_temp_tables/0,
-    feature_block_info/0,
-    feature_timezone/0,
-    feature_quota_key_in_client_info/0,
-    feature_display_name/0,
-    feature_version_patch/0,
-    feature_server_logs/0,
-    feature_column_defaults_metadata/0,
-    feature_client_write_info/0,
-    feature_settings_serialized_as_strings/0,
-    feature_inter_server_secret/0,
-    feature_open_telemetry/0,
-    feature_x_forwarded_for_in_client_info/0,
-    feature_referer_in_client_info/0,
-    feature_distributed_depth/0,
-    feature_query_start_time/0,
-    feature_profile_events/0,
-    feature_parallel_replicas/0,
-    feature_custom_serialization/0,
-    feature_quota_key/0,
-    feature_parameters/0,
-    feature_server_query_time_in_progress/0,
-    feature_json_strings/0
+-ignore_xref([
+    feature_version/1
 ]).
 
 %% Feature version constants
@@ -98,28 +77,3 @@ feature_version(quota_key) -> ?FEATURE_QUOTA_KEY;
 feature_version(parameters) -> ?FEATURE_PARAMETERS;
 feature_version(server_query_time_in_progress) -> ?FEATURE_SERVER_QUERY_TIME_IN_PROGRESS;
 feature_version(json_strings) -> ?FEATURE_JSON_STRINGS.
-
-%% Convenience functions that return the feature version
-feature_temp_tables() -> ?FEATURE_TEMP_TABLES.
-feature_block_info() -> ?FEATURE_BLOCK_INFO.
-feature_timezone() -> ?FEATURE_TIMEZONE.
-feature_quota_key_in_client_info() -> ?FEATURE_QUOTA_KEY_IN_CLIENT_INFO.
-feature_display_name() -> ?FEATURE_DISPLAY_NAME.
-feature_version_patch() -> ?FEATURE_VERSION_PATCH.
-feature_server_logs() -> ?FEATURE_SERVER_LOGS.
-feature_column_defaults_metadata() -> ?FEATURE_COLUMN_DEFAULTS_METADATA.
-feature_client_write_info() -> ?FEATURE_CLIENT_WRITE_INFO.
-feature_settings_serialized_as_strings() -> ?FEATURE_SETTINGS_SERIALIZED_AS_STRINGS.
-feature_inter_server_secret() -> ?FEATURE_INTER_SERVER_SECRET.
-feature_open_telemetry() -> ?FEATURE_OPEN_TELEMETRY.
-feature_x_forwarded_for_in_client_info() -> ?FEATURE_X_FORWARDED_FOR_IN_CLIENT_INFO.
-feature_referer_in_client_info() -> ?FEATURE_REFERER_IN_CLIENT_INFO.
-feature_distributed_depth() -> ?FEATURE_DISTRIBUTED_DEPTH.
-feature_query_start_time() -> ?FEATURE_QUERY_START_TIME.
-feature_profile_events() -> ?FEATURE_PROFILE_EVENTS.
-feature_parallel_replicas() -> ?FEATURE_PARALLEL_REPLICAS.
-feature_custom_serialization() -> ?FEATURE_CUSTOM_SERIALIZATION.
-feature_quota_key() -> ?FEATURE_QUOTA_KEY.
-feature_parameters() -> ?FEATURE_PARAMETERS.
-feature_server_query_time_in_progress() -> ?FEATURE_SERVER_QUERY_TIME_IN_PROGRESS.
-feature_json_strings() -> ?FEATURE_JSON_STRINGS.
