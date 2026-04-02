@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Unified batch and streaming query paths — batch mode now uses a default `on_data` callback (`default_on_data_callback/2`) instead of a separate column accumulation path
+- Streaming data events now include column type: `{data, #{name => ColName, type => ColType, value => Value}}`
+- `clickhouse_erl_app`: extracted `add_optional_callbacks/2` helper to DRY callback option forwarding for both `query/3` and `insert/4`
+
+### Added
+- `default_on_data_callback/2` — batch-accumulating callback that collects column values and transposes to `#{columns, rows}` on `'end'`
+- `default_callback_acc()` and `batch_result()` types exported from connection module
+
+### Fixed
+- `clickhouse_erl_types_time`: `encode_time64/1` for raw integer input now correctly converts through `time64_to_nanoseconds/1`
+
+### Removed
+- `finalize_current_column/1`, `find_and_merge_column/3,4`, `transpose_columns_to_rows/1` — replaced by default callback
+- Batch-mode branching in `dispatch_column_value/5`, `finalize_streaming_end/1`, and `build_query_result/1`
+
 ## [0.2.0](https://github.com/couchemar/clickhouse_erl/releases/tag/v0.2.0) - 2026-03-21
 
 ### Added
