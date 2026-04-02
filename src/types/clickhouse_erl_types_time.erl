@@ -158,7 +158,8 @@ encode_time64({Hour, Minute, Second, Nanosecond}) when
 encode_time64(Nanoseconds) when is_integer(Nanoseconds) ->
     case validate_time64_nanoseconds(Nanoseconds) of
         ok ->
-            {ok, <<Nanoseconds:64/little-signed>>};
+            EncodedNs = time64_to_nanoseconds(Nanoseconds),
+            {ok, <<EncodedNs:64/little-signed>>};
         Error ->
             Error
     end;
@@ -197,10 +198,10 @@ seconds_to_time(Seconds) ->
 
 %% @doc Convert time64 tuple to nanoseconds since midnight.
 -spec time64_to_nanoseconds(time64_value()) -> non_neg_integer().
-time64_to_nanoseconds({Hour, Minute, Second, Nanosecond}) ->
-    (Hour * 3600 + Minute * 60 + Second) * 1000000000 + Nanosecond;
 time64_to_nanoseconds(Nanoseconds) when is_integer(Nanoseconds) ->
-    Nanoseconds.
+    Nanoseconds;
+time64_to_nanoseconds({Hour, Minute, Second, Nanosecond}) ->
+    (Hour * 3600 + Minute * 60 + Second) * 1000000000 + Nanosecond.
 
 %% @doc Convert nanoseconds since midnight to time64 tuple.
 -spec nanoseconds_to_time64(non_neg_integer()) -> {0..23, 0..59, 0..59, 0..999999999}.

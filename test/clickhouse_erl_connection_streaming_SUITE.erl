@@ -3,22 +3,7 @@
 
 -export([all/0, suite/0, init_per_suite/1, end_per_suite/1]).
 -export([
-    validate_on_data_callback_correct_arity/1,
-    validate_on_data_callback_incorrect_arity_1/1,
-    validate_on_data_callback_incorrect_arity_3/1,
-    validate_on_progress_callback_correct_arity/1,
-    validate_on_progress_callback_incorrect_arity/1,
-    validate_on_profile_callback_correct_arity/1,
-    validate_on_profile_callback_incorrect_arity/1,
-    validate_on_profile_events_callback_correct_arity/1,
-    validate_on_profile_events_callback_incorrect_arity/1,
-    validate_callback_not_a_function/1,
-    validate_callback_undefined/1,
-    validate_prepared_request_with_valid_on_data/1,
-    validate_prepared_request_with_invalid_on_data/1,
-    validate_prepared_request_with_valid_optional_callbacks/1,
-    validate_prepared_request_with_invalid_on_progress/1,
-    validate_prepared_request_without_callbacks/1,
+    % Integration tests that require ClickHouse connection
     query_with_invalid_callback_rejected/1,
     query_with_valid_callback_accepted/1,
     query_without_callbacks_works/1,
@@ -32,23 +17,9 @@ suite() ->
     [{timetrap, {seconds, 60}}].
 
 all() ->
+    % Only integration tests that require ClickHouse connection
+    % Unit tests for callback validation are in clickhouse_erl_connection_callback_tests
     [
-        validate_on_data_callback_correct_arity,
-        validate_on_data_callback_incorrect_arity_1,
-        validate_on_data_callback_incorrect_arity_3,
-        validate_on_progress_callback_correct_arity,
-        validate_on_progress_callback_incorrect_arity,
-        validate_on_profile_callback_correct_arity,
-        validate_on_profile_callback_incorrect_arity,
-        validate_on_profile_events_callback_correct_arity,
-        validate_on_profile_events_callback_incorrect_arity,
-        validate_callback_not_a_function,
-        validate_callback_undefined,
-        validate_prepared_request_with_valid_on_data,
-        validate_prepared_request_with_invalid_on_data,
-        validate_prepared_request_with_valid_optional_callbacks,
-        validate_prepared_request_with_invalid_on_progress,
-        validate_prepared_request_without_callbacks,
         query_with_invalid_callback_rejected,
         query_with_valid_callback_accepted,
         query_without_callbacks_works,
@@ -65,109 +36,6 @@ init_per_suite(Config) ->
 end_per_suite(_Config) ->
     test_helpers:cleanup(),
     ok.
-
-%% Callback arity validation tests
-validate_on_data_callback_correct_arity(_Config) ->
-    Callback = fun(_DataBlock, _Acc) -> {ok, []} end,
-    ok = clickhouse_erl_connection:validate_callback(on_data, Callback).
-
-validate_on_data_callback_incorrect_arity_1(_Config) ->
-    Callback = fun(_DataBlock) -> {ok, []} end,
-    {error, {invalid_callback_arity, 2, 1}} = clickhouse_erl_connection:validate_callback(
-        on_data, Callback
-    ).
-
-validate_on_data_callback_incorrect_arity_3(_Config) ->
-    Callback = fun(_DataBlock, _Acc, _Extra) -> {ok, []} end,
-    {error, {invalid_callback_arity, 2, 3}} = clickhouse_erl_connection:validate_callback(
-        on_data, Callback
-    ).
-
-validate_on_progress_callback_correct_arity(_Config) ->
-    Callback = fun(_ProgressInfo) -> ok end,
-    ok = clickhouse_erl_connection:validate_callback(on_progress, Callback).
-
-validate_on_progress_callback_incorrect_arity(_Config) ->
-    Callback = fun(_ProgressInfo, _Extra) -> ok end,
-    {error, {invalid_callback_arity, 1, 2}} = clickhouse_erl_connection:validate_callback(
-        on_progress, Callback
-    ).
-
-validate_on_profile_callback_correct_arity(_Config) ->
-    Callback = fun(_ProfileInfo) -> ok end,
-    ok = clickhouse_erl_connection:validate_callback(on_profile, Callback).
-
-validate_on_profile_callback_incorrect_arity(_Config) ->
-    Callback = fun() -> ok end,
-    {error, {invalid_callback_arity, 1, 0}} = clickhouse_erl_connection:validate_callback(
-        on_profile, Callback
-    ).
-
-validate_on_profile_events_callback_correct_arity(_Config) ->
-    Callback = fun(_ProfileEvents) -> ok end,
-    ok = clickhouse_erl_connection:validate_callback(on_profile_events, Callback).
-
-validate_on_profile_events_callback_incorrect_arity(_Config) ->
-    Callback = fun(_ProfileEvents, _Extra) -> ok end,
-    {error, {invalid_callback_arity, 1, 2}} = clickhouse_erl_connection:validate_callback(
-        on_profile_events, Callback
-    ).
-
-validate_callback_not_a_function(_Config) ->
-    NotAFunction = "not a function",
-    {error, {invalid_callback_type, NotAFunction}} = clickhouse_erl_connection:validate_callback(
-        on_data, NotAFunction
-    ).
-
-validate_callback_undefined(_Config) ->
-    ok = clickhouse_erl_connection:validate_callback(on_data, undefined).
-
-%% PreparedRequest validation tests
-validate_prepared_request_with_valid_on_data(_Config) ->
-    PreparedRequest = #{
-        sql => <<"SELECT 1">>,
-        query_id => <<"test-query">>,
-        on_data => fun(_DataBlock, _Acc) -> {ok, []} end,
-        initial_accumulator => []
-    },
-    ok = clickhouse_erl_connection:validate_prepared_request(PreparedRequest).
-
-validate_prepared_request_with_invalid_on_data(_Config) ->
-    PreparedRequest = #{
-        sql => <<"SELECT 1">>,
-        query_id => <<"test-query">>,
-        on_data => fun(_DataBlock) -> {ok, []} end
-    },
-    {error, {invalid_callback_arity, 2, 1}} = clickhouse_erl_connection:validate_prepared_request(
-        PreparedRequest
-    ).
-
-validate_prepared_request_with_valid_optional_callbacks(_Config) ->
-    PreparedRequest = #{
-        sql => <<"SELECT 1">>,
-        query_id => <<"test-query">>,
-        on_progress => fun(_ProgressInfo) -> ok end,
-        on_profile => fun(_ProfileInfo) -> ok end,
-        on_profile_events => fun(_ProfileEvents) -> ok end
-    },
-    ok = clickhouse_erl_connection:validate_prepared_request(PreparedRequest).
-
-validate_prepared_request_with_invalid_on_progress(_Config) ->
-    PreparedRequest = #{
-        sql => <<"SELECT 1">>,
-        query_id => <<"test-query">>,
-        on_progress => fun(_ProgressInfo, _Extra) -> ok end
-    },
-    {error, {invalid_callback_arity, 1, 2}} = clickhouse_erl_connection:validate_prepared_request(
-        PreparedRequest
-    ).
-
-validate_prepared_request_without_callbacks(_Config) ->
-    PreparedRequest = #{
-        sql => <<"SELECT 1">>,
-        query_id => <<"test-query">>
-    },
-    ok = clickhouse_erl_connection:validate_prepared_request(PreparedRequest).
 
 %% Integration tests with connection
 query_with_invalid_callback_rejected(_Config) ->

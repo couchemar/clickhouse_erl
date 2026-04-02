@@ -29,3 +29,4 @@ go.sum
 priv/*.so
 c_src/*.d
 c_src/*.o
+.bin/

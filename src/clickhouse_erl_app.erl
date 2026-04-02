@@ -94,20 +94,8 @@ query(Connection, SQL, Options) ->
         parameters => maps:get(parameters, Options, []),
         timeout => maps:get(timeout, Options, 30000)
     },
-    %% Pass through streaming callback options if present
-    PreparedRequestWithCallbacks =
-        case maps:get(on_data, Options, undefined) of
-            undefined ->
-                PreparedRequest;
-            OnData ->
-                PreparedRequest#{
-                    on_data => OnData,
-                    initial_accumulator => maps:get(initial_accumulator, Options, undefined),
-                    on_progress => maps:get(on_progress, Options, undefined),
-                    on_profile => maps:get(on_profile, Options, undefined),
-                    on_profile_events => maps:get(on_profile_events, Options, undefined)
-                }
-        end,
+    %% Pass through streaming callback options if present (omit if undefined)
+    PreparedRequestWithCallbacks = add_optional_callbacks(PreparedRequest, Options),
     clickhouse_erl_connection:query(Connection, PreparedRequestWithCallbacks).
 
 %% @doc Execute an INSERT query on the ClickHouse server
@@ -144,7 +132,7 @@ insert(Connection, SQL, Input, Options) ->
         timeout => Timeout
     }),
 
-    %% Pass through streaming callback options if present
+    %% Pass through streaming callback options if present (omit if undefined)
     case maps:get(on_data, Options, undefined) of
         undefined ->
             clickhouse_erl_query_manager:execute_insert(Connection, BinSQL, Input, Timeout);
@@ -167,14 +155,13 @@ insert(Connection, SQL, Input, Options) ->
                 %% Use 'input' key for INSERT data
                 input => Input,
                 num_columns => NumColumns,
-                num_rows => NumRows,
-                on_data => OnData,
-                initial_accumulator => maps:get(initial_accumulator, Options, undefined),
-                on_progress => maps:get(on_progress, Options, undefined),
-                on_profile => maps:get(on_profile, Options, undefined),
-                on_profile_events => maps:get(on_profile_events, Options, undefined)
+                num_rows => NumRows
             },
-            clickhouse_erl_connection:insert(Connection, PreparedRequest)
+            %% Add callbacks only if provided (omit undefined values)
+            PreparedRequestWithCallbacks = add_optional_callbacks(
+                PreparedRequest#{on_data => OnData}, Options
+            ),
+            clickhouse_erl_connection:insert(Connection, PreparedRequestWithCallbacks)
     end.
 
 %% @doc Cancel an active query by query ID
@@ -206,3 +193,20 @@ stop_connection_child({_Id, Pid, _Type, _Modules}) when is_pid(Pid) ->
     end;
 stop_connection_child(_) ->
     ok.
+
+%% @doc Add optional callback options to PreparedRequest, omitting undefined values.
+%% This ensures validation passes since undefined callbacks are no longer allowed.
+-spec add_optional_callbacks(PreparedRequest, Options) -> PreparedRequest when
+    PreparedRequest :: map(),
+    Options :: map().
+add_optional_callbacks(PreparedRequest, Options) ->
+    lists:foldl(
+        fun(Key, Acc) ->
+            case maps:get(Key, Options, undefined) of
+                undefined -> Acc;
+                Value -> Acc#{Key => Value}
+            end
+        end,
+        PreparedRequest,
+        [on_data, initial_accumulator, on_progress, on_profile, on_profile_events]
+    ).

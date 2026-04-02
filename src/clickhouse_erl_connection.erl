@@ -498,7 +498,11 @@
     % Event processing (exported for testing)
     process_events/2,
     % Query result building (exported for testing)
-    build_query_result/1
+    build_query_result/1,
+    % Default streaming callback (exported for testing and fun reference)
+    default_on_data_callback/2,
+    % ActiveQueryState builder (exported for testing)
+    build_active_query_state/7
 ]).
 
 -ignore_xref([
@@ -513,7 +517,9 @@
     validate_and_normalize_compression_opts/1,
     init_acc_state/1,
     process_events/2,
-    build_query_result/1
+    build_query_result/1,
+    default_on_data_callback/2,
+    build_active_query_state/7
 ]).
 
 %% gen_server callbacks
@@ -591,29 +597,41 @@
     replied := boolean(),
     is_insert => boolean(),
     rows_to_insert => non_neg_integer(),
-    %% Streaming callbacks
-    on_data => function() | undefined,
-    accumulator => term(),
-    on_progress => function() | undefined,
-    on_profile => function() | undefined,
-    on_profile_events => function() | undefined,
+    %% Always present — default or user-provided
+    on_data := function(),
+    accumulator := term(),
+    on_progress := function(),
+    on_profile := function(),
+    on_profile_events := function(),
     %% Compression options from connection state
     compression_opts => clickhouse_erl_compression:compression_opts() | undefined,
     %% Event-driven parser state
     parser_state => term() | undefined,
-    %% Current column name for streaming mode event dispatch
-    current_column_name => binary() | undefined,
-    %% Whether query was started with user-provided on_data callback
-    streaming_mode => boolean()
+    %% Current column name for event dispatch
+    current_column_name => binary() | undefined
 }.
 
 -type state() :: #connection_state{}.
+
+%% Default callback accumulator shape
+-type default_callback_acc() :: #{
+    column_order := [binary()],
+    column_meta := #{binary() => #{name := binary(), type := binary()}},
+    column_values := #{binary() => [term()]}
+}.
+
+%% Batch result format produced by default callback on 'end'
+-type batch_result() :: #{
+    columns := [#{name := binary(), type := binary()}],
+    rows := [[term()]]
+}.
 
 %% Export types for other modules
 -export_type([
     connection_options/0,
     connection_info/0,
-    connection_error/0
+    connection_error/0,
+    default_callback_acc/0
 ]).
 
 %%%===================================================================
@@ -1179,12 +1197,14 @@ handle_info({tcp, Socket, Data}, State) ->
 
             %% Get or initialize accumulator state for event processing
             %% Persist across TCP chunks so multi-packet results accumulate correctly.
-            %% An initialized AccState always has the 'columns' key (set by init_acc_state).
-            %% A raw user initial_accumulator (e.g. #{}) won't have it, so we can
+            %% An initialized AccState always has the 'on_data_callback' key
+            %% (set by init_acc_state). A raw user initial_accumulator won't have it, so we can
             %% distinguish "already initialized" from "needs initialization".
             AccState =
                 case State#connection_state.active_query_state of
-                    #{accumulator := PrevAcc} when is_map(PrevAcc), is_map_key(columns, PrevAcc) ->
+                    #{accumulator := PrevAcc} when
+                        is_map(PrevAcc), is_map_key(on_data_callback, PrevAcc)
+                    ->
                         PrevAcc;
                     InitAQS when is_map(InitAQS) ->
                         init_acc_state(InitAQS);
@@ -1393,9 +1413,6 @@ validate_and_normalize_compression_opts(Options) ->
     Reason ::
         {invalid_callback_arity, Expected :: non_neg_integer(), Actual :: non_neg_integer()}
         | {invalid_callback_type, term()}.
-validate_callback(_CallbackType, undefined) ->
-    %% undefined is valid (optional callback)
-    ok;
 validate_callback(CallbackType, Callback) when is_function(Callback) ->
     %% Determine expected arity based on callback type
     ExpectedArity =
@@ -1420,6 +1437,9 @@ validate_callback(CallbackType, Callback) when is_function(Callback) ->
         _ ->
             {error, {invalid_callback_arity, ExpectedArity, ActualArity}}
     end;
+validate_callback(_CallbackType, undefined) ->
+    %% undefined is not allowed - defaults are set before validation in build_active_query_state
+    {error, {invalid_callback_type, undefined}};
 validate_callback(_CallbackType, NotAFunction) ->
     %% Not a function and not undefined
     {error, {invalid_callback_type, NotAFunction}}.
@@ -1449,17 +1469,19 @@ validate_callbacks([], _PreparedRequest) ->
     %% All callbacks validated successfully
     ok;
 validate_callbacks([CallbackType | Rest], PreparedRequest) ->
-    %% Get callback from PreparedRequest (undefined if not present)
-    Callback = maps:get(CallbackType, PreparedRequest, undefined),
-
-    %% Validate this callback
-    case validate_callback(CallbackType, Callback) of
-        ok ->
-            %% Continue with remaining callbacks
-            validate_callbacks(Rest, PreparedRequest);
-        {error, Reason} ->
-            %% Validation failed, return error
-            {error, Reason}
+    %% Only validate callbacks that are actually present in the request.
+    %% Missing callbacks get defaults in build_active_query_state.
+    case maps:find(CallbackType, PreparedRequest) of
+        {ok, Callback} ->
+            case validate_callback(CallbackType, Callback) of
+                ok ->
+                    validate_callbacks(Rest, PreparedRequest);
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        error ->
+            %% Not provided — will get a default, skip validation
+            validate_callbacks(Rest, PreparedRequest)
     end.
 
 -spec execute_query(State, PreparedRequest, From) -> {ok, NewState} | {error, Reason} when
@@ -1531,8 +1553,13 @@ build_active_query_state(
     OnProgress = maps:get(on_progress, PreparedRequest, fun(_) -> ok end),
     OnProfile = maps:get(on_profile, PreparedRequest, fun(_) -> ok end),
     OnProfileEvents = maps:get(on_profile_events, PreparedRequest, fun(_) -> ok end),
-    StreamingMode = maps:is_key(on_data, PreparedRequest),
-    Base = #{
+    %% Always store on_data — use default callback when user doesn't provide one
+    OnData =
+        case maps:find(on_data, PreparedRequest) of
+            {ok, UserOnData} -> UserOnData;
+            error -> fun default_on_data_callback/2
+        end,
+    #{
         caller => From,
         query_id => QueryId,
         timeout => Timeout,
@@ -1540,22 +1567,12 @@ build_active_query_state(
         cancelled => false,
         replied => false,
         accumulator => InitialAccumulator,
+        on_data => OnData,
         on_progress => OnProgress,
         on_profile => OnProfile,
         on_profile_events => OnProfileEvents,
-        %% Compression options from connection state
-        compression_opts => CompressionOpts,
-        %% Whether user provided on_data callback (true = streaming, false = batch)
-        streaming_mode => StreamingMode
-    },
-    %% Only include on_data when user provides a callback (streaming mode).
-    %% Batch mode uses the existing column accumulation path — no callback needed.
-    case maps:find(on_data, PreparedRequest) of
-        {ok, OnData} ->
-            Base#{on_data => OnData};
-        error ->
-            Base
-    end.
+        compression_opts => CompressionOpts
+    }.
 
 %% @doc Create ActiveQueryState with proper InitialAccumulator handling
 %% This helper encapsulates the common pattern of determining InitialAccumulator
@@ -1582,17 +1599,8 @@ create_active_query_state(
     InitialAccumulator =
         case maps:is_key(on_data, PreparedRequest) of
             false ->
-                %% Batch mode - initialize with empty result_accumulator
-                #result_accumulator{
-                    columns = [],
-                    rows = [],
-                    total_rows = 0,
-                    statistics = #{
-                        rows_read => 0,
-                        bytes_read => 0,
-                        elapsed_time => 0
-                    }
-                };
+                %% Batch mode — default callback manages its own accumulator
+                #{column_order => [], column_meta => #{}, column_values => #{}};
             true ->
                 %% Streaming mode - use provided initial_accumulator or undefined
                 maps:get(initial_accumulator, PreparedRequest, undefined)
@@ -2932,13 +2940,7 @@ process_single_event({'end', server_exception}, EosAcc, NmAcc, _ExAcc, Acc) ->
 process_single_event({'end', Type}, EosAcc, NmAcc, ExAcc, Acc) when
     Type =:= server_data; Type =:= server_totals; Type =:= server_extremes
 ->
-    CBT = maps:get(current_block_type, Acc, undefined),
-    Finalized =
-        case CBT of
-            server_data -> finalize_current_column(Acc);
-            _ -> Acc
-        end,
-    {EosAcc, NmAcc, ExAcc, Finalized#{current_block_type => undefined}};
+    {EosAcc, NmAcc, ExAcc, Acc#{current_block_type => undefined}};
 process_single_event({'end', _Type}, EosAcc, NmAcc, ExAcc, Acc) ->
     {EosAcc, NmAcc, ExAcc, Acc#{current_block_type => undefined}};
 process_single_event({data, Field, Value}, EosAcc, NmAcc, ExAcc, Acc) when ExAcc ->
@@ -2947,12 +2949,32 @@ process_single_event({data, Field, Value}, EosAcc, NmAcc, ExAcc, Acc) when ExAcc
 process_single_event({data, column, ColumnMeta}, EosAcc, NmAcc, ExAcc, Acc) ->
     case maps:get(current_block_type, Acc, undefined) of
         server_data ->
-            TmpAcc = finalize_current_column(Acc),
             ColName = maps:get(name, ColumnMeta, undefined),
-            {EosAcc, NmAcc, ExAcc, TmpAcc#{
+            ColType = maps:get(type, ColumnMeta, undefined),
+            %% If the default callback is in use, update its accumulator with
+            %% column metadata directly. The default callback accumulator has a
+            %% column_meta key; user accumulators do not.
+            Acc2 =
+                case maps:get(user_acc, Acc, undefined) of
+                    #{column_meta := _} = UserAcc ->
+                        %% Default callback accumulator — inject column_meta
+                        case maps:is_key(ColName, maps:get(column_meta, UserAcc)) of
+                            true ->
+                                %% First occurrence wins (Req 5.3)
+                                Acc;
+                            false ->
+                                NewMeta = (maps:get(column_meta, UserAcc))#{
+                                    ColName => #{name => ColName, type => ColType}
+                                },
+                                Acc#{user_acc => UserAcc#{column_meta => NewMeta}}
+                        end;
+                    _ ->
+                        Acc
+                end,
+            {EosAcc, NmAcc, ExAcc, Acc2#{
                 current_column => ColumnMeta,
                 current_column_name => ColName,
-                column_data => []
+                current_column_type => ColType
             }};
         _ ->
             {EosAcc, NmAcc, ExAcc, Acc}
@@ -2970,17 +2992,92 @@ process_single_event({data, wrote_rows, WroteRows}, EosAcc, NmAcc, ExAcc, Acc) -
 process_single_event({data, _Field, _Value}, EosAcc, NmAcc, ExAcc, Acc) ->
     {EosAcc, NmAcc, ExAcc, Acc}.
 
-%% @doc Finalize streaming mode on end_of_stream by calling callback with 'end'.
+%% @doc Default streaming callback that replicates batch accumulation behavior.
+%% Used when the user does not provide an `on_data' callback. Accumulates
+%% column values in a map and transposes to row-oriented format on `'end''.
+%%
+%% Handles three event types:
+%% - `{column_meta, #{name, type}}' — stores column metadata (first occurrence wins)
+%% - `{data, #{name, value}}' — accumulates value under column name
+%% - `'end'' — reverses value lists, transposes to `#{columns, rows}'
+%%
+%% Returns `{ok, NewAcc}' for data/column_meta events, and
+%% `{ok, #{columns => [...], rows => [...]}' for the `'end'' event.
+-spec default_on_data_callback(Event, Acc) -> {ok, NewAcc} when
+    Event ::
+        {data, #{name := binary(), value := term()}}
+        | {column_meta, #{name := binary(), type := binary()}}
+        | 'end',
+    Acc :: default_callback_acc(),
+    NewAcc :: default_callback_acc() | batch_result().
+default_on_data_callback({column_meta, #{name := ColName, type := ColType}}, Acc) ->
+    #{column_order := Order, column_meta := Meta} = Acc,
+    %% First occurrence wins (Req 5.3)
+    case maps:is_key(ColName, Meta) of
+        true ->
+            {ok, Acc};
+        false ->
+            {ok, Acc#{
+                column_order => [ColName | Order],
+                column_meta => Meta#{ColName => #{name => ColName, type => ColType}}
+            }}
+    end;
+default_on_data_callback({data, #{name := ColName, value := Value}}, Acc) ->
+    #{column_order := Order, column_values := Values} = Acc,
+    %% Track column order on first data event if not already tracked via column_meta
+    NewOrder =
+        case lists:member(ColName, Order) of
+            true -> Order;
+            false -> [ColName | Order]
+        end,
+    %% Prepend value (reversed on 'end' for efficiency)
+    ExistingValues = maps:get(ColName, Values, []),
+    {ok, Acc#{
+        column_order => NewOrder,
+        column_values => Values#{ColName => [Value | ExistingValues]}
+    }};
+default_on_data_callback('end', #{column_order := [], column_meta := _, column_values := _}) ->
+    %% Zero-row case
+    {ok, #{columns => [], rows => []}};
+default_on_data_callback('end', Acc) ->
+    #{column_order := Order0, column_meta := Meta, column_values := Values} = Acc,
+    %% Reverse column order (was accumulated in reverse via prepend)
+    Order = lists:reverse(Order0),
+    %% Build columns metadata in order
+    Columns = [maps:get(ColName, Meta, #{name => ColName, type => <<>>}) || ColName <- Order],
+    %% Reverse value lists (were accumulated in reverse)
+    ReversedValues = [lists:reverse(maps:get(ColName, Values, [])) || ColName <- Order],
+    %% Transpose column-oriented to row-oriented
+    Rows = transpose_default_columns(ReversedValues),
+    {ok, #{columns => Columns, rows => Rows}}.
+
+%% @doc Transpose column-oriented value lists to row-oriented lists.
+%% Input: [[col1_v1, col1_v2], [col2_v1, col2_v2]]
+%% Output: [[col1_v1, col2_v1], [col1_v2, col2_v2]]
+-spec transpose_default_columns([[term()]]) -> [[term()]].
+transpose_default_columns([]) ->
+    [];
+transpose_default_columns(ColumnLists) ->
+    case hd(ColumnLists) of
+        [] ->
+            [];
+        _ ->
+            NumRows = length(hd(ColumnLists)),
+            [
+                [lists:nth(RowIdx, ColData) || ColData <- ColumnLists]
+             || RowIdx <- lists:seq(1, NumRows)
+            ]
+    end.
+
+%% @doc Finalize streaming on end_of_stream by calling callback with 'end'.
+%% The callback is always present in AccState (either the default batch-accumulating
+%% callback or a user-provided one), so no branching is needed.
 -spec finalize_streaming_end(map()) -> map().
 finalize_streaming_end(Acc) ->
-    case maps:get(on_data_callback, Acc, undefined) of
-        undefined ->
-            Acc;
-        Callback ->
-            UserAcc = maps:get(user_acc, Acc),
-            {ok, FinalUserAcc} = Callback('end', UserAcc),
-            Acc#{user_acc => FinalUserAcc}
-    end.
+    Callback = maps:get(on_data_callback, Acc),
+    UserAcc = maps:get(user_acc, Acc),
+    {ok, FinalUserAcc} = Callback('end', UserAcc),
+    Acc#{user_acc => FinalUserAcc}.
 
 %% @doc Map parser exception field names to API names and accumulate.
 -spec accumulate_exception_field(atom(), term(), map()) -> map().
@@ -2995,25 +3092,23 @@ accumulate_exception_field(Field, Value, Acc) ->
     ExInfo = maps:get(exception_info, Acc, #{}),
     Acc#{exception_info => ExInfo#{MappedField => Value}}.
 
-%% @doc Dispatch a column value in batch or streaming mode.
+%% @doc Dispatch a column value through the streaming callback.
+%% The callback is always present in AccState (either the default batch-accumulating
+%% callback or a user-provided one), so no branching is needed.
 -spec dispatch_column_value(term(), boolean(), boolean(), boolean(), map()) ->
     {boolean(), boolean(), boolean(), map()} | {callback_error, term()}.
 dispatch_column_value(Value, EosAcc, NmAcc, ExAcc, Acc) ->
-    case maps:get(on_data_callback, Acc, undefined) of
-        undefined ->
-            ColData = maps:get(column_data, Acc, []),
-            {EosAcc, NmAcc, ExAcc, Acc#{column_data => [Value | ColData]}};
-        Callback ->
-            invoke_streaming_callback(Callback, Value, EosAcc, NmAcc, ExAcc, Acc)
-    end.
+    Callback = maps:get(on_data_callback, Acc),
+    invoke_streaming_callback(Callback, Value, EosAcc, NmAcc, ExAcc, Acc).
 
 %% @doc Invoke the user streaming callback, returning error tuple on failure.
 -spec invoke_streaming_callback(function(), term(), boolean(), boolean(), boolean(), map()) ->
     {boolean(), boolean(), boolean(), map()} | {callback_error, term()}.
 invoke_streaming_callback(Callback, Value, EosAcc, NmAcc, ExAcc, Acc) ->
     ColName = maps:get(current_column_name, Acc, undefined),
+    ColType = maps:get(current_column_type, Acc, undefined),
     UserAcc = maps:get(user_acc, Acc),
-    try Callback({data, #{name => ColName, value => Value}}, UserAcc) of
+    try Callback({data, #{name => ColName, type => ColType, value => Value}}, UserAcc) of
         {ok, NewUserAcc} ->
             {EosAcc, NmAcc, ExAcc, Acc#{user_acc => NewUserAcc}};
         {error, Reason} ->
@@ -3026,141 +3121,35 @@ invoke_streaming_callback(Callback, Value, EosAcc, NmAcc, ExAcc, Acc) ->
     end.
 
 %% @doc Initialize accumulator state for event processing.
-%% In streaming mode (user provided on_data callback), stores the callback
-%% and user accumulator in AccState for per-value dispatch.
-%% In batch mode, AccState has no callback fields — column accumulation
-%% uses the existing path.
+%% Always populates `on_data_callback' and `user_acc' fields.
+%% When the user provides an `on_data' callback, uses that callback and
+%% the user's `initial_accumulator'. Otherwise, uses the default callback
+%% that replicates batch accumulation behavior.
 -spec init_acc_state(ActiveQueryState :: map()) -> map().
 init_acc_state(ActiveQueryState) ->
-    Base = #{
-        columns => [],
+    {Callback, UserAcc} =
+        case maps:get(on_data, ActiveQueryState, undefined) of
+            undefined ->
+                {fun default_on_data_callback/2, #{
+                    column_order => [], column_meta => #{}, column_values => #{}
+                }};
+            UserCallback when is_function(UserCallback) ->
+                {UserCallback, maps:get(accumulator, ActiveQueryState, undefined)}
+        end,
+    #{
         current_column => undefined,
         current_column_name => undefined,
-        column_data => [],
+        current_column_type => undefined,
         current_block_type => undefined,
         exception_info => undefined,
-        rows_written => 0
-    },
-    case maps:get(streaming_mode, ActiveQueryState, false) of
-        true ->
-            Base#{
-                on_data_callback => maps:get(on_data, ActiveQueryState),
-                user_acc => maps:get(accumulator, ActiveQueryState)
-            };
-        false ->
-            Base
-    end.
-
-%% @doc Finalize current column by adding it to the columns list
--spec finalize_current_column(map()) -> map().
-finalize_current_column(#{current_column := undefined} = AccState) ->
-    %% No current column to finalize
-    AccState;
-finalize_current_column(
-    #{current_column := ColumnMeta, column_data := ColumnData, columns := Columns} = AccState
-) ->
-    case ColumnData of
-        [] ->
-            %% Empty column (from header block with 0 rows) - skip it
-            AccState#{
-                current_column => undefined,
-                column_data => []
-            };
-        _ ->
-            %% Reverse column data (was accumulated in reverse)
-            NewData = lists:reverse(ColumnData),
-            ColName = maps:get(name, ColumnMeta),
-            %% Check if column already exists (multi-block result) and merge
-            case find_and_merge_column(ColName, NewData, Columns) of
-                {merged, MergedColumns} ->
-                    AccState#{
-                        columns => MergedColumns,
-                        current_column => undefined,
-                        column_data => []
-                    };
-                not_found ->
-                    FinalColumn = ColumnMeta#{data => NewData},
-                    AccState#{
-                        columns => [FinalColumn | Columns],
-                        current_column => undefined,
-                        column_data => []
-                    }
-            end
-    end;
-finalize_current_column(AccState) ->
-    %% No current column
-    AccState.
-
-%% @doc Find a column by name and merge new data into it.
-%% Returns {merged, UpdatedColumns} if found, or not_found.
--spec find_and_merge_column(binary(), [term()], [map()]) ->
-    {merged, [map()]} | not_found.
-find_and_merge_column(_Name, _NewData, []) ->
-    not_found;
-find_and_merge_column(Name, NewData, Columns) ->
-    find_and_merge_column(Name, NewData, Columns, []).
-
--spec find_and_merge_column(binary(), [term()], [map()], [map()]) ->
-    {merged, [map()]} | not_found.
-find_and_merge_column(_Name, _NewData, [], _Acc) ->
-    not_found;
-find_and_merge_column(Name, NewData, [Col | Rest], Acc) ->
-    case maps:get(name, Col) of
-        Name ->
-            %% Found matching column - append new data
-            ExistingData = maps:get(data, Col, []),
-            MergedCol = Col#{data => ExistingData ++ NewData},
-            {merged, lists:reverse(Acc) ++ [MergedCol | Rest]};
-        _ ->
-            find_and_merge_column(Name, NewData, Rest, [Col | Acc])
-    end.
+        rows_written => 0,
+        on_data_callback => Callback,
+        user_acc => UserAcc
+    }.
 
 %% @doc Build query result from accumulated data.
-%% In streaming mode (on_data_callback present), returns #{data => FinalUserAcc}.
-%% In batch mode, returns column-oriented result with rows.
+%% Always reads from user_acc — the default callback or user callback
+%% has already finalized the accumulator via the 'end' event.
 -spec build_query_result(map()) -> map().
-build_query_result(#{on_data_callback := _, user_acc := UserAcc}) ->
-    %% Streaming mode: return the user's finalized accumulator
-    #{data => UserAcc};
-build_query_result(#{columns := Columns} = _AccState) when is_list(Columns), length(Columns) > 0 ->
-    %% Reverse columns (accumulated in reverse order)
-    FinalColumns = lists:reverse(Columns),
-
-    %% Convert column-oriented data to row-oriented format
-    Rows = transpose_columns_to_rows(FinalColumns),
-
-    #{
-        data => #{
-            columns => [
-                #{name => maps:get(name, C), type => maps:get(type, C)}
-             || C <- FinalColumns
-            ],
-            rows => Rows
-        }
-    };
-build_query_result(_AccState) ->
-    %% Empty result
-    #{data => #{columns => [], rows => []}}.
-
-%% @doc Transpose column-oriented data to row-oriented format
--spec transpose_columns_to_rows([map()]) -> [[term()]].
-transpose_columns_to_rows([]) ->
-    [];
-transpose_columns_to_rows(Columns) ->
-    %% Get column data lists
-    ColumnDataLists = [maps:get(data, Col, []) || Col <- Columns],
-
-    %% Check if all columns have data
-    case lists:all(fun(L) -> length(L) > 0 end, ColumnDataLists) of
-        false ->
-            %% No data or empty columns
-            [];
-        true ->
-            %% Transpose: convert [[col1_row1, col1_row2], [col2_row1, col2_row2]]
-            %% to [[col1_row1, col2_row1], [col1_row2, col2_row2]]
-            NumRows = length(hd(ColumnDataLists)),
-            [
-                [lists:nth(RowIdx, ColData) || ColData <- ColumnDataLists]
-             || RowIdx <- lists:seq(1, NumRows)
-            ]
-    end.
+build_query_result(#{user_acc := UserAcc}) ->
+    #{data => UserAcc}.

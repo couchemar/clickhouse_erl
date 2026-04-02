@@ -318,8 +318,8 @@ parser_state_cleared_on_error_test() ->
 %%%===================================================================
 
 acc_state_batch_mode_no_callback_test() ->
-    %% In batch mode (no on_data in options), AccState should NOT have
-    %% on_data_callback or user_acc fields
+    %% In batch mode (no on_data key), AccState should have the default
+    %% callback and default accumulator (unified streaming path)
     ActiveQueryState = #{
         caller => {self(), make_ref()},
         handler_state => undefined,
@@ -328,20 +328,23 @@ acc_state_batch_mode_no_callback_test() ->
         timer_ref => undefined,
         cancelled => false,
         replied => false,
-        on_data => fun(_DataBlock, Acc) -> Acc end,
         accumulator => [],
         on_progress => fun(_) -> ok end,
         on_profile => fun(_) -> ok end,
-        on_profile_events => fun(_) -> ok end,
-        streaming_mode => false
+        on_profile_events => fun(_) -> ok end
     },
     AccState = clickhouse_erl_connection:init_acc_state(ActiveQueryState),
-    ?assertEqual(undefined, maps:get(on_data_callback, AccState, undefined)),
-    ?assertEqual(undefined, maps:get(user_acc, AccState, undefined)).
+    %% on_data_callback is always present (default callback for batch mode)
+    ?assert(is_function(maps:get(on_data_callback, AccState), 2)),
+    %% user_acc is the default callback accumulator
+    ?assertEqual(
+        #{column_order => [], column_meta => #{}, column_values => #{}},
+        maps:get(user_acc, AccState)
+    ).
 
 acc_state_streaming_mode_stores_callback_test() ->
-    %% In streaming mode (on_data provided), AccState should have
-    %% on_data_callback and user_acc fields
+    %% When on_data is provided, AccState should store the user's callback
+    %% and accumulator (streaming_mode field no longer needed)
     MyCallback = fun
         ({data, #{name := _Name, value := _Value}}, Acc) -> {ok, Acc};
         ('end', Acc) -> {ok, Acc}
@@ -359,16 +362,15 @@ acc_state_streaming_mode_stores_callback_test() ->
         accumulator => InitialAcc,
         on_progress => fun(_) -> ok end,
         on_profile => fun(_) -> ok end,
-        on_profile_events => fun(_) -> ok end,
-        streaming_mode => true
+        on_profile_events => fun(_) -> ok end
     },
     AccState = clickhouse_erl_connection:init_acc_state(ActiveQueryState),
     ?assertEqual(MyCallback, maps:get(on_data_callback, AccState)),
     ?assertEqual(InitialAcc, maps:get(user_acc, AccState)).
 
 acc_state_streaming_mode_default_accumulator_test() ->
-    %% When streaming mode is true but accumulator is undefined,
-    %% user_acc should be undefined
+    %% When on_data is provided but accumulator is undefined,
+    %% user_acc should be undefined (user's choice)
     MyCallback = fun(_, Acc) -> {ok, Acc} end,
     ActiveQueryState = #{
         caller => {self(), make_ref()},
@@ -382,15 +384,14 @@ acc_state_streaming_mode_default_accumulator_test() ->
         accumulator => undefined,
         on_progress => fun(_) -> ok end,
         on_profile => fun(_) -> ok end,
-        on_profile_events => fun(_) -> ok end,
-        streaming_mode => true
+        on_profile_events => fun(_) -> ok end
     },
     AccState = clickhouse_erl_connection:init_acc_state(ActiveQueryState),
     ?assertEqual(MyCallback, maps:get(on_data_callback, AccState)),
     ?assertEqual(undefined, maps:get(user_acc, AccState)).
 
 acc_state_preserves_existing_fields_test() ->
-    %% Verify that AccState always has the standard fields regardless of mode
+    %% Verify that AccState always has the standard fields
     ActiveQueryState = #{
         caller => {self(), make_ref()},
         handler_state => undefined,
@@ -399,18 +400,15 @@ acc_state_preserves_existing_fields_test() ->
         timer_ref => undefined,
         cancelled => false,
         replied => false,
-        on_data => fun(_, Acc) -> Acc end,
         accumulator => [],
         on_progress => fun(_) -> ok end,
         on_profile => fun(_) -> ok end,
-        on_profile_events => fun(_) -> ok end,
-        streaming_mode => false
+        on_profile_events => fun(_) -> ok end
     },
     AccState = clickhouse_erl_connection:init_acc_state(ActiveQueryState),
-    ?assertEqual([], maps:get(columns, AccState)),
     ?assertEqual(undefined, maps:get(current_column, AccState)),
     ?assertEqual(undefined, maps:get(current_column_name, AccState)),
-    ?assertEqual([], maps:get(column_data, AccState)),
+    ?assertEqual(undefined, maps:get(current_column_type, AccState)),
     ?assertEqual(undefined, maps:get(current_block_type, AccState)),
     ?assertEqual(undefined, maps:get(exception_info, AccState)),
     ?assertEqual(0, maps:get(rows_written, AccState)).
@@ -427,10 +425,8 @@ end_of_stream_calls_callback_with_end_in_streaming_mode_test() ->
         ('end', Acc) -> {ok, {finalized, Acc}}
     end,
     AccState = #{
-        columns => [],
         current_column => undefined,
         current_column_name => undefined,
-        column_data => [],
         current_block_type => undefined,
         exception_info => undefined,
         rows_written => 0,
@@ -445,33 +441,33 @@ end_of_stream_calls_callback_with_end_in_streaming_mode_test() ->
     %% Callback should have been called with 'end', producing {finalized, ...}
     ?assertEqual({finalized, [value1, value2]}, maps:get(user_acc, NewAccState)).
 
-end_of_stream_no_callback_in_batch_mode_test() ->
-    %% In batch mode (no on_data_callback), end_of_stream should just
-    %% set the flag without calling any callback
+end_of_stream_with_default_callback_test() ->
+    %% With unified path, end_of_stream always invokes the callback with 'end'.
+    %% The default callback transforms accumulated data into batch result format.
+    DefaultAcc = #{column_order => [], column_meta => #{}, column_values => #{}},
     AccState = #{
-        columns => [],
         current_column => undefined,
         current_column_name => undefined,
-        column_data => [],
+        current_column_type => undefined,
         current_block_type => undefined,
         exception_info => undefined,
-        rows_written => 0
+        rows_written => 0,
+        on_data_callback => fun clickhouse_erl_connection:default_on_data_callback/2,
+        user_acc => DefaultAcc
     },
     EventList = [{'end', server_end_of_stream}],
     {HasEos, _NeedMore, _HasException, NewAccState} =
         clickhouse_erl_connection:process_events(EventList, AccState),
     ?assert(HasEos),
-    %% AccState should be unchanged (no user_acc field)
-    ?assertEqual(undefined, maps:get(user_acc, NewAccState, undefined)).
+    %% Default callback 'end' produces batch result format
+    ?assertEqual(#{columns => [], rows => []}, maps:get(user_acc, NewAccState)).
 
 build_query_result_returns_user_acc_in_streaming_mode_test() ->
     %% In streaming mode, build_query_result should return
     %% #{data => FinalUserAcc} instead of column-oriented result
     AccState = #{
-        columns => [],
         current_column => undefined,
         current_column_name => undefined,
-        column_data => [],
         current_block_type => undefined,
         exception_info => undefined,
         rows_written => 0,
@@ -482,30 +478,37 @@ build_query_result_returns_user_acc_in_streaming_mode_test() ->
     Expected = #{data => #{<<"name">> => [<<"alice">>, <<"bob">>], <<"age">> => [30, 25]}},
     ?assertEqual(Expected, Result).
 
-build_query_result_batch_mode_unchanged_test() ->
-    %% In batch mode, build_query_result should still return column-oriented result
+build_query_result_always_reads_user_acc_test() ->
+    %% build_query_result always reads from user_acc (unified path)
     AccState = #{
-        columns => [
-            #{name => <<"id">>, type => <<"UInt64">>, data => [1, 2]}
-        ],
+        on_data_callback => fun(_, Acc) -> {ok, Acc} end,
+        user_acc => #{
+            columns => [#{name => <<"id">>, type => <<"UInt64">>}],
+            rows => [[1], [2]]
+        },
         current_column => undefined,
         current_column_name => undefined,
-        column_data => [],
         current_block_type => undefined,
         exception_info => undefined,
         rows_written => 0
     },
     Result = clickhouse_erl_connection:build_query_result(AccState),
-    ?assertMatch(#{data := #{columns := _, rows := _}}, Result).
+    ?assertEqual(
+        #{
+            data => #{
+                columns => [#{name => <<"id">>, type => <<"UInt64">>}],
+                rows => [[1], [2]]
+            }
+        },
+        Result
+    ).
 
 end_of_stream_with_empty_accumulator_test() ->
     %% Streaming mode with undefined accumulator should still call callback
     Callback = fun('end', undefined) -> {ok, done} end,
     AccState = #{
-        columns => [],
         current_column => undefined,
         current_column_name => undefined,
-        column_data => [],
         current_block_type => undefined,
         exception_info => undefined,
         rows_written => 0,
