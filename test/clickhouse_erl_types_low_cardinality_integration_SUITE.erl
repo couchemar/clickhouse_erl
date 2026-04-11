@@ -31,7 +31,7 @@ end_per_suite(_Config) ->
     ok.
 
 %% Test simple low cardinality string round trip with ClickHouse
-simple_low_cardinality_string_roundtrip(Config) ->
+simple_low_cardinality_string_roundtrip(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_low_cardinality_simple">>),
@@ -80,7 +80,7 @@ simple_low_cardinality_string_roundtrip(Config) ->
     ok.
 
 %% Test low cardinality with many unique values
-high_cardinality(Config) ->
+high_cardinality(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_low_cardinality_high">>),
@@ -129,7 +129,7 @@ high_cardinality(Config) ->
     ok.
 
 %% Test low cardinality with all identical values
-all_identical_values(Config) ->
+all_identical_values(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_low_cardinality_identical">>),
@@ -177,7 +177,7 @@ all_identical_values(Config) ->
     ok.
 
 %% Test low cardinality with empty strings
-empty_strings(Config) ->
+empty_strings(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_low_cardinality_empty">>),
@@ -223,7 +223,7 @@ empty_strings(Config) ->
     ok.
 
 %% Test multiple low cardinality columns
-multiple_low_cardinality_columns(Config) ->
+multiple_low_cardinality_columns(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_low_cardinality_multiple">>),

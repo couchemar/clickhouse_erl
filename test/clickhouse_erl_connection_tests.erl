@@ -667,3 +667,311 @@ connection_with_invalid_compression_level_test() ->
 
     %% Should return error
     ?assertMatch({error, {protocol_error, {invalid_compression_level, 99}}}, Result).
+
+%%%===================================================================
+%%% on_log Callback Tests (Task 1.1)
+%%% Feature: on-log-callback
+%%%===================================================================
+
+%% Test: validate_callback(on_log, fun(_) -> ok end) returns ok
+%% Validates: Requirements 1.3, 2.1
+validate_callback_on_log_valid_test() ->
+    Result = clickhouse_erl_connection:validate_callback(on_log, fun(_) -> ok end),
+    ?assertEqual(ok, Result).
+
+%% Test: validate_callback(on_log, "not_a_fun") returns {error, {invalid_callback_type, "not_a_fun"}}
+%% Validates: Requirements 2.2
+validate_callback_on_log_invalid_type_test() ->
+    Result = clickhouse_erl_connection:validate_callback(on_log, "not_a_fun"),
+    ?assertEqual({error, {invalid_callback_type, "not_a_fun"}}, Result).
+
+%% Test: validate_callback(on_log, fun(_, _) -> ok end) returns {error, {invalid_callback_arity, 1, 2}}
+%% Validates: Requirements 1.4, 2.3
+validate_callback_on_log_wrong_arity_test() ->
+    Result = clickhouse_erl_connection:validate_callback(on_log, fun(_, _) -> ok end),
+    ?assertEqual({error, {invalid_callback_arity, 1, 2}}, Result).
+
+%% Test: validate_prepared_request with invalid on_log returns error
+%% Validates: Requirements 2.4
+validate_prepared_request_on_log_invalid_test() ->
+    PreparedRequest = #{
+        sql => <<"SELECT 1">>,
+        on_log => "not_a_function"
+    },
+    Result = clickhouse_erl_connection:validate_prepared_request(PreparedRequest),
+    ?assertEqual({error, {invalid_callback_type, "not_a_function"}}, Result).
+
+%% Test: on_log defaults to no-op when absent from PreparedRequest
+%% Validates: Requirements 1.2
+build_active_query_state_on_log_default_test() ->
+    From = {self(), make_ref()},
+    PreparedRequest = #{sql => <<"SELECT 1">>},
+    ActiveQueryState = clickhouse_erl_connection:build_active_query_state(
+        From, <<"test-query">>, 30000, undefined, undefined, PreparedRequest, undefined
+    ),
+    OnLog = maps:get(on_log, ActiveQueryState),
+    ?assert(is_function(OnLog, 1)),
+    %% Default no-op should return ok
+    ?assertEqual(ok, OnLog(#{text => <<"test">>})).
+
+%% Test: on_log is stored when provided in PreparedRequest
+%% Validates: Requirements 1.1
+build_active_query_state_on_log_provided_test() ->
+    From = {self(), make_ref()},
+    MyCallback = fun(LogEntry) -> {received, LogEntry} end,
+    PreparedRequest = #{sql => <<"SELECT 1">>, on_log => MyCallback},
+    ActiveQueryState = clickhouse_erl_connection:build_active_query_state(
+        From, <<"test-query">>, 30000, undefined, undefined, PreparedRequest, undefined
+    ),
+    OnLog = maps:get(on_log, ActiveQueryState),
+    ?assertEqual(MyCallback, OnLog),
+    ?assertEqual({received, #{text => <<"hello">>}}, OnLog(#{text => <<"hello">>})).
+
+%%%===================================================================
+%%% server_log Event Accumulation and Dispatch Tests (Task 3.1)
+%%% Feature: on-log-callback
+%%%===================================================================
+
+%% Test: empty server_log block invokes callback zero times
+%% Validates: Requirements 3.1, 3.4, 4.1
+process_events_server_log_empty_block_test() ->
+    Self = self(),
+    OnLog = fun(Entry) ->
+        Self ! {log_entry, Entry},
+        ok
+    end,
+    AccState = clickhouse_erl_connection:init_acc_state(#{on_log => OnLog}),
+    Events = [
+        {start, server_log},
+        {'end', server_log}
+    ],
+    {false, false, false, _NewAcc} = clickhouse_erl_connection:process_events(Events, AccState),
+    %% No messages should have been sent
+    receive
+        {log_entry, _} -> ?assert(false)
+    after 0 ->
+        ok
+    end.
+
+%% Test: single-row server_log block with 8 columns produces correct Log_Entry map
+%% Validates: Requirements 3.2, 3.3, 3.4, 4.1, 4.2
+process_events_server_log_single_row_test() ->
+    Self = self(),
+    OnLog = fun(Entry) ->
+        Self ! {log_entry, Entry},
+        ok
+    end,
+    AccState = clickhouse_erl_connection:init_acc_state(#{on_log => OnLog}),
+    Events = [
+        {start, server_log},
+        {data, column, #{name => <<"event_time">>, type => <<"DateTime">>}},
+        {data, column_value, 1700000000},
+        {data, column, #{name => <<"event_time_microseconds">>, type => <<"UInt32">>}},
+        {data, column_value, 123456},
+        {data, column, #{name => <<"host_name">>, type => <<"String">>}},
+        {data, column_value, <<"server1">>},
+        {data, column, #{name => <<"query_id">>, type => <<"String">>}},
+        {data, column_value, <<"q-123">>},
+        {data, column, #{name => <<"thread_id">>, type => <<"UInt64">>}},
+        {data, column_value, 42},
+        {data, column, #{name => <<"priority">>, type => <<"Int8">>}},
+        {data, column_value, 6},
+        {data, column, #{name => <<"source">>, type => <<"String">>}},
+        {data, column_value, <<"executeQuery">>},
+        {data, column, #{name => <<"text">>, type => <<"String">>}},
+        {data, column_value, <<"Read 100 rows">>},
+        {'end', server_log}
+    ],
+    {false, false, false, _NewAcc} = clickhouse_erl_connection:process_events(Events, AccState),
+    receive
+        {log_entry, Entry} ->
+            ?assertEqual(1700000000, maps:get(<<"event_time">>, Entry)),
+            ?assertEqual(123456, maps:get(<<"event_time_microseconds">>, Entry)),
+            ?assertEqual(<<"server1">>, maps:get(<<"host_name">>, Entry)),
+            ?assertEqual(<<"q-123">>, maps:get(<<"query_id">>, Entry)),
+            ?assertEqual(42, maps:get(<<"thread_id">>, Entry)),
+            ?assertEqual(6, maps:get(<<"priority">>, Entry)),
+            ?assertEqual(<<"executeQuery">>, maps:get(<<"source">>, Entry)),
+            ?assertEqual(<<"Read 100 rows">>, maps:get(<<"text">>, Entry)),
+            ?assertEqual(8, map_size(Entry))
+    after 100 ->
+        ?assert(false)
+    end.
+
+%% Test: multi-row server_log block invokes callback once per row
+%% Validates: Requirements 3.3, 3.4, 4.1
+process_events_server_log_multi_row_test() ->
+    Self = self(),
+    OnLog = fun(Entry) ->
+        Self ! {log_entry, Entry},
+        ok
+    end,
+    AccState = clickhouse_erl_connection:init_acc_state(#{on_log => OnLog}),
+    %% 3 rows, 8 columns — data arrives column-by-column
+    Events = [
+        {start, server_log},
+        {data, column, #{name => <<"event_time">>, type => <<"DateTime">>}},
+        {data, column_value, 100},
+        {data, column_value, 200},
+        {data, column_value, 300},
+        {data, column, #{name => <<"event_time_microseconds">>, type => <<"UInt32">>}},
+        {data, column_value, 1},
+        {data, column_value, 2},
+        {data, column_value, 3},
+        {data, column, #{name => <<"host_name">>, type => <<"String">>}},
+        {data, column_value, <<"h1">>},
+        {data, column_value, <<"h2">>},
+        {data, column_value, <<"h3">>},
+        {data, column, #{name => <<"query_id">>, type => <<"String">>}},
+        {data, column_value, <<"q1">>},
+        {data, column_value, <<"q2">>},
+        {data, column_value, <<"q3">>},
+        {data, column, #{name => <<"thread_id">>, type => <<"UInt64">>}},
+        {data, column_value, 10},
+        {data, column_value, 20},
+        {data, column_value, 30},
+        {data, column, #{name => <<"priority">>, type => <<"Int8">>}},
+        {data, column_value, 1},
+        {data, column_value, 2},
+        {data, column_value, 3},
+        {data, column, #{name => <<"source">>, type => <<"String">>}},
+        {data, column_value, <<"s1">>},
+        {data, column_value, <<"s2">>},
+        {data, column_value, <<"s3">>},
+        {data, column, #{name => <<"text">>, type => <<"String">>}},
+        {data, column_value, <<"t1">>},
+        {data, column_value, <<"t2">>},
+        {data, column_value, <<"t3">>},
+        {'end', server_log}
+    ],
+    {false, false, false, _NewAcc} = clickhouse_erl_connection:process_events(Events, AccState),
+    %% Collect all 3 entries
+    Entries = collect_log_entries(3),
+    ?assertEqual(3, length(Entries)),
+    %% Verify row 1
+    Row1 = lists:nth(1, Entries),
+    ?assertEqual(100, maps:get(<<"event_time">>, Row1)),
+    ?assertEqual(<<"h1">>, maps:get(<<"host_name">>, Row1)),
+    ?assertEqual(<<"t1">>, maps:get(<<"text">>, Row1)),
+    %% Verify row 3
+    Row3 = lists:nth(3, Entries),
+    ?assertEqual(300, maps:get(<<"event_time">>, Row3)),
+    ?assertEqual(<<"h3">>, maps:get(<<"host_name">>, Row3)),
+    ?assertEqual(<<"t3">>, maps:get(<<"text">>, Row3)).
+
+%% Test: callback returning {error, _} doesn't stop processing
+%% Validates: Requirements 4.3, 4.4
+process_events_server_log_callback_error_test() ->
+    Self = self(),
+    OnLog = fun(Entry) ->
+        Self ! {log_entry, Entry},
+        {error, intentional_error}
+    end,
+    AccState = clickhouse_erl_connection:init_acc_state(#{on_log => OnLog}),
+    Events = [
+        {start, server_log},
+        {data, column, #{name => <<"text">>, type => <<"String">>}},
+        {data, column_value, <<"row1">>},
+        {data, column_value, <<"row2">>},
+        {'end', server_log}
+    ],
+    {false, false, false, _NewAcc} = clickhouse_erl_connection:process_events(Events, AccState),
+    %% Both entries should have been dispatched despite errors
+    Entries = collect_log_entries(2),
+    ?assertEqual(2, length(Entries)).
+
+%% Test: crashing callback doesn't stop processing
+%% Validates: Requirements 4.5
+process_events_server_log_callback_crash_test() ->
+    Self = self(),
+    OnLog = fun(Entry) ->
+        Self ! {log_entry, Entry},
+        error(intentional_crash)
+    end,
+    AccState = clickhouse_erl_connection:init_acc_state(#{on_log => OnLog}),
+    Events = [
+        {start, server_log},
+        {data, column, #{name => <<"text">>, type => <<"String">>}},
+        {data, column_value, <<"row1">>},
+        {data, column_value, <<"row2">>},
+        {'end', server_log}
+    ],
+    {false, false, false, _NewAcc} = clickhouse_erl_connection:process_events(Events, AccState),
+    %% Both entries should have been dispatched despite crashes
+    Entries = collect_log_entries(2),
+    ?assertEqual(2, length(Entries)).
+
+%% Helper: collect N log entries from the process mailbox
+collect_log_entries(N) ->
+    collect_log_entries(N, []).
+
+collect_log_entries(0, Acc) ->
+    lists:reverse(Acc);
+collect_log_entries(N, Acc) ->
+    receive
+        {log_entry, Entry} ->
+            collect_log_entries(N - 1, [Entry | Acc])
+    after 100 ->
+        lists:reverse(Acc)
+    end.
+
+%%%===================================================================
+%%% Public API Forwarding Tests (Task 5.1)
+%%% Feature: on-log-callback
+%%%===================================================================
+
+%% Test: on_log is forwarded from Options to PreparedRequest
+%% Validates: Requirements 5.1, 5.2, 5.3
+add_optional_callbacks_on_log_test() ->
+    OnLog = fun(_) -> ok end,
+    Options = #{on_log => OnLog},
+    PreparedRequest = #{sql => <<"SELECT 1">>},
+    Result = clickhouse_erl_app:add_optional_callbacks(PreparedRequest, Options),
+    ?assertEqual(OnLog, maps:get(on_log, Result)),
+    ?assertEqual(<<"SELECT 1">>, maps:get(sql, Result)).
+
+%%%===================================================================
+%%% Backward Compatibility and Default Logging Callback Tests (Task 6.1)
+%%% Feature: on-log-callback
+%%%===================================================================
+
+%% Test: default_on_log_callback/1 returns ok when invoked with a log entry map
+%% Validates: Requirements 1.2, 6.2
+default_on_log_callback_returns_ok_test() ->
+    LogEntry = #{
+        <<"text">> => <<"Read 100 rows">>,
+        <<"source">> => <<"executeQuery">>,
+        <<"priority">> => 6,
+        <<"query_id">> => <<"q-123">>,
+        <<"host_name">> => <<"server1">>
+    },
+    ?assertEqual(ok, clickhouse_erl_connection:default_on_log_callback(LogEntry)).
+
+%% Test: process server_log events without providing on_log, verify no errors
+%% and processing continues normally with the default callback
+%% Validates: Requirements 6.1, 6.3
+server_log_events_dispatched_with_default_callback_test() ->
+    %% Build AccState without providing on_log — should use default_on_log_callback
+    AccState = clickhouse_erl_connection:init_acc_state(#{sql => <<"SELECT 1">>}),
+    Events = [
+        {start, server_log},
+        {data, column, #{name => <<"event_time">>, type => <<"DateTime">>}},
+        {data, column_value, 1700000000},
+        {data, column, #{name => <<"event_time_microseconds">>, type => <<"UInt32">>}},
+        {data, column_value, 123456},
+        {data, column, #{name => <<"host_name">>, type => <<"String">>}},
+        {data, column_value, <<"server1">>},
+        {data, column, #{name => <<"query_id">>, type => <<"String">>}},
+        {data, column_value, <<"q-123">>},
+        {data, column, #{name => <<"thread_id">>, type => <<"UInt64">>}},
+        {data, column_value, 42},
+        {data, column, #{name => <<"priority">>, type => <<"Int8">>}},
+        {data, column_value, 6},
+        {data, column, #{name => <<"source">>, type => <<"String">>}},
+        {data, column_value, <<"executeQuery">>},
+        {data, column, #{name => <<"text">>, type => <<"String">>}},
+        {data, column_value, <<"Read 100 rows">>},
+        {'end', server_log}
+    ],
+    %% Should not crash — default callback logs via ?LOG_DEBUG and returns ok
+    {false, false, false, _NewAcc} = clickhouse_erl_connection:process_events(Events, AccState).

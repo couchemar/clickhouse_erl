@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `clickhouse_erl_app`: extracted `add_optional_callbacks/2` helper to DRY callback option forwarding for both `query/3` and `insert/4`
 
 ### Added
+- `on_log` callback option for receiving server log entries during query execution — pass `#{on_log => fun(LogEntry) -> ok end}` in query options
+- `default_on_log_callback/1` — default callback that logs server entries via `?LOG_DEBUG` with structured metadata when no user callback is provided
 - `default_on_data_callback/2` — batch-accumulating callback that collects column values and transposes to `#{columns, rows}` on `'end'`
 - `default_callback_acc()` and `batch_result()` types exported from connection module
 

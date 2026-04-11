@@ -304,7 +304,7 @@ successful_handshake_custom_credentials(Config) ->
 
 %% @doc Test handshake with various client versions
 %% Requirements: 2.1, 3.1
-handshake_different_client_versions(Config) ->
+handshake_different_client_versions(_Config) ->
     ClientVersions = [
         {0, 1, 0},
         {1, 0, 0},
@@ -340,7 +340,7 @@ handshake_different_client_versions(Config) ->
 
 %% @doc Test handshake with different database names
 %% Requirements: 2.1, 3.1
-handshake_different_databases(Config) ->
+handshake_different_databases(_Config) ->
     Databases = [
         "default",
         test_helpers:test_database(),
@@ -380,7 +380,7 @@ handshake_different_databases(Config) ->
 
 %% @doc Test multiple concurrent connections
 %% Requirements: 1.1, 2.1, 3.1
-concurrent_connections(Config) ->
+concurrent_connections(_Config) ->
     NumConnections = 5,
 
     % Start multiple connections concurrently
@@ -437,7 +437,7 @@ concurrent_connections(Config) ->
 
 %% @doc Test connection pooling behavior (rapid connect/disconnect)
 %% Requirements: 1.1, 2.1, 3.1
-connection_pooling(Config) ->
+connection_pooling(_Config) ->
     NumIterations = 10,
 
     % Rapidly create and destroy connections
@@ -469,7 +469,7 @@ connection_pooling(Config) ->
 
 %% @doc Test concurrent connections with different credentials
 %% Requirements: 1.1, 2.1, 3.1
-concurrent_different_credentials(Config) ->
+concurrent_different_credentials(_Config) ->
     % Create connections with different configurations
     Configs = [
         #{
@@ -494,8 +494,8 @@ concurrent_different_credentials(Config) ->
 
     % Start all connections
     ConnectionPids = lists:map(
-        fun(Config) ->
-            ConfigWithTimeout = maps:put(timeout, ?CONNECTION_TIMEOUT, Config),
+        fun(ConnConfig) ->
+            ConfigWithTimeout = maps:put(timeout, ?CONNECTION_TIMEOUT, ConnConfig),
             case
                 clickhouse_erl_connection:connect(
                     test_helpers:clickhouse_host(),
@@ -506,7 +506,7 @@ concurrent_different_credentials(Config) ->
                 {ok, Connection} ->
                     Connection;
                 {error, Reason} ->
-                    ?debugFmt("Connection failed for config ~p: ~p~n", [Config, Reason]),
+                    ?debugFmt("Connection failed for config ~p: ~p~n", [ConnConfig, Reason]),
                     ?assert(false)
             end
         end,
@@ -537,7 +537,7 @@ concurrent_different_credentials(Config) ->
 
 %% @doc Test connection to non-existent host
 %% Requirements: 1.1
-connection_nonexistent_host(Config) ->
+connection_nonexistent_host(_Config) ->
     Result = clickhouse_erl_connection:connect(
         "nonexistent.invalid.domain.test", test_helpers:clickhouse_port(), #{}
     ),
@@ -546,7 +546,7 @@ connection_nonexistent_host(Config) ->
 
 %% @doc Test connection to invalid port
 %% Requirements: 1.1
-connection_invalid_port(Config) ->
+connection_invalid_port(_Config) ->
     % Try to connect to a port that should be closed
     Result = clickhouse_erl_connection:connect(test_helpers:clickhouse_host(), 65534, #{}),
 
@@ -554,7 +554,7 @@ connection_invalid_port(Config) ->
 
 %% @doc Test connection timeout
 %% Requirements: 1.1
-connection_timeout(Config) ->
+connection_timeout(_Config) ->
     % Use a very short timeout to force timeout error
     Options = #{timeout => 1},
 
@@ -567,7 +567,7 @@ connection_timeout(Config) ->
 
 %% @doc Test invalid credentials
 %% Requirements: 2.1, 3.1
-invalid_credentials(Config) ->
+invalid_credentials(_Config) ->
     % Try to connect with invalid credentials
     Options = #{
         database => "nonexistent_database",
@@ -594,7 +594,7 @@ invalid_credentials(Config) ->
 
 %% @doc Test connection with malformed options
 %% Requirements: 2.1
-malformed_options(Config) ->
+malformed_options(_Config) ->
     % Test with edge case options that should be handled gracefully
     EdgeCaseOptions = [
         #{
@@ -628,7 +628,7 @@ malformed_options(Config) ->
 
 %% @doc Test network interruption during handshake
 %% Requirements: 1.1, 2.1, 3.1
-network_interruption(Config) ->
+network_interruption(_Config) ->
     % This test simulates network issues by connecting to the wrong port
     % or using very short timeouts
 
@@ -645,7 +645,7 @@ network_interruption(Config) ->
 
 %% @doc Test resource cleanup after connection failures
 %% Requirements: 1.1
-resource_cleanup_after_failure(Config) ->
+resource_cleanup_after_failure(_Config) ->
     InitialProcessCount = length(processes()),
     InitialPortCount = length(erlang:ports()),
 
@@ -680,7 +680,7 @@ resource_cleanup_after_failure(Config) ->
 
 %% @doc Test connection recovery after temporary network issues
 %% Requirements: 1.1, 2.1, 3.1
-connection_recovery(Config) ->
+connection_recovery(_Config) ->
     % First, establish a successful connection to verify server is working
     Options = #{
         username => test_helpers:test_username(),
@@ -713,7 +713,7 @@ connection_recovery(Config) ->
 
 %% @doc Stress test with many rapid connections
 %% Requirements: 1.1, 2.1, 3.1
-stress_rapid_connections(Config) ->
+stress_rapid_connections(_Config) ->
     NumConnections = 20,
 
     % Create many connections rapidly
@@ -781,7 +781,7 @@ stress_rapid_connections(Config) ->
 
 %% @doc Test that error information is complete and descriptive
 %% Requirements: 1.1, 2.1, 3.1
-error_information_completeness(Config) ->
+error_information_completeness(_Config) ->
     % Test various error scenarios and verify error information
 
     % Network error
@@ -819,7 +819,7 @@ error_information_completeness(Config) ->
 
 %% @doc Test version compatibility checking
 %% Requirements: 3.1
-version_compatibility(Config) ->
+version_compatibility(_Config) ->
     % Test the version compatibility function directly
 
     % Current protocol version
@@ -844,7 +844,7 @@ version_compatibility(Config) ->
 
 %% @doc Test exception handling during handshake with authentication failures
 %% Requirements: 1.1, 2.1, 3.1, 6.1
-exception_handling_authentication_failure(Config) ->
+exception_handling_authentication_failure(_Config) ->
     % Test 1: Invalid username
     InvalidUserOptions = #{
         username => "nonexistent_user_12345",
@@ -926,7 +926,7 @@ exception_handling_authentication_failure(Config) ->
 
 %% @doc Test exception handling during different connection phases
 %% Requirements: 1.2, 1.3, 6.1, 6.2, 6.3, 6.4
-exception_handling_connection_phases(Config) ->
+exception_handling_connection_phases(_Config) ->
     % Test 1: Exception during handshake (covered by authentication test above)
     % Test 2: Exception during query execution (when query functionality is implemented)
 
@@ -992,7 +992,7 @@ exception_handling_connection_phases(Config) ->
 
 %% @doc Test nested exception scenarios during connection establishment
 %% Requirements: 3.1, 3.2, 3.3, 6.1, 6.2, 6.3
-nested_exception_handling(Config) ->
+nested_exception_handling(_Config) ->
     % Test nested exception parsing and handling
     % Create a nested exception scenario
 
@@ -1106,7 +1106,7 @@ nested_exception_handling(Config) ->
 
 %% @doc Test exception handling with various error scenarios
 %% Requirements: 1.1, 2.1, 3.1, 6.1
-exception_handling_error_scenarios(Config) ->
+exception_handling_error_scenarios(_Config) ->
     % Test various ClickHouse error codes and their handling
     ErrorScenarios = [
         % Core errors
@@ -1178,7 +1178,7 @@ exception_handling_error_scenarios(Config) ->
 
 %% @doc Test exception propagation completeness during connection lifecycle
 %% Requirements: 6.1, 6.2, 6.3, 6.4
-exception_propagation_completeness(Config) ->
+exception_propagation_completeness(_Config) ->
     % Test that exceptions are properly propagated through all connection layers
 
     % Test 1: Exception propagation during connection establishment
@@ -1263,7 +1263,7 @@ exception_propagation_completeness(Config) ->
 
 %% @doc Test that server exceptions are properly handled and propagated
 %% Requirements: 1.2, 1.3, 6.1, 6.2, 6.3, 6.4
-exception_handling_integration(Config) ->
+exception_handling_integration(_Config) ->
     % Establish a connection
     Options = #{
         username => test_helpers:test_username(),
@@ -1291,7 +1291,7 @@ exception_handling_integration(Config) ->
 
 %% @doc Test exception packet recognition and parsing
 %% Requirements: 1.2, 1.3, 6.1, 6.2, 6.3
-exception_packet_recognition(Config) ->
+exception_packet_recognition(_Config) ->
     % Test that the connection manager can recognize exception packets
     % This is a unit-style test within the integration test suite
 
@@ -2011,7 +2011,7 @@ insert_invalid_column_name(_Config) ->
 
 %% @doc Test INSERT with large dataset
 %% Requirements: 1.1, 1.2, 1.3, 1.4
-insert_large_dataset(Config) ->
+insert_large_dataset(_Config) ->
     % Connect to ClickHouse
     Options = #{
         username => test_helpers:test_username(),
@@ -2060,7 +2060,7 @@ insert_large_dataset(Config) ->
 
 %% @doc Test multiple sequential INSERTs on same connection
 %% Requirements: 1.1, 1.2, 1.3, 1.4
-insert_sequential(Config) ->
+insert_sequential(_Config) ->
     % Connect to ClickHouse
     Options = #{
         username => test_helpers:test_username(),
@@ -2102,7 +2102,7 @@ insert_sequential(Config) ->
 
 %% @doc Test INSERT with custom timeout
 %% Requirements: 1.1, 1.4
-insert_with_timeout(Config) ->
+insert_with_timeout(_Config) ->
     % Connect to ClickHouse
     Options = #{
         username => test_helpers:test_username(),
@@ -2138,7 +2138,7 @@ insert_with_timeout(Config) ->
 
 %% @doc Test INSERT atomicity with verification
 %% Requirements: 1.6
-insert_atomicity(Config) ->
+insert_atomicity(_Config) ->
     % Connect to ClickHouse
     Options = #{
         username => test_helpers:test_username(),

@@ -31,7 +31,7 @@ end_per_suite(_Config) ->
     ok.
 
 %% Test simple nullable round trip with ClickHouse
-simple_nullable_roundtrip(Config) ->
+simple_nullable_roundtrip(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_nullable_simple">>),
@@ -69,7 +69,7 @@ simple_nullable_roundtrip(Config) ->
     ok.
 
 %% Test nullable strings
-nullable_string_roundtrip(Config) ->
+nullable_string_roundtrip(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_nullable_string">>),
@@ -107,7 +107,7 @@ nullable_string_roundtrip(Config) ->
     ok.
 
 %% Test all null values
-all_null_values(Config) ->
+all_null_values(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_nullable_all_null">>),
@@ -145,7 +145,7 @@ all_null_values(Config) ->
     ok.
 
 %% Test all non-null values
-all_non_null_values(Config) ->
+all_non_null_values(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_nullable_all_non_null">>),
@@ -183,7 +183,7 @@ all_non_null_values(Config) ->
     ok.
 
 %% Test multiple nullable columns
-multiple_nullable_columns(Config) ->
+multiple_nullable_columns(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_nullable_multiple">>),

@@ -501,6 +501,8 @@
     build_query_result/1,
     % Default streaming callback (exported for testing and fun reference)
     default_on_data_callback/2,
+    % Default on_log callback (exported for testing and fun reference)
+    default_on_log_callback/1,
     % ActiveQueryState builder (exported for testing)
     build_active_query_state/7
 ]).
@@ -519,6 +521,7 @@
     process_events/2,
     build_query_result/1,
     default_on_data_callback/2,
+    default_on_log_callback/1,
     build_active_query_state/7
 ]).
 
@@ -603,6 +606,7 @@
     on_progress := function(),
     on_profile := function(),
     on_profile_events := function(),
+    on_log := function(),
     %% Compression options from connection state
     compression_opts => clickhouse_erl_compression:compression_opts() | undefined,
     %% Event-driven parser state
@@ -1408,7 +1412,7 @@ validate_and_normalize_compression_opts(Options) ->
 %% Checks that the callback has the correct arity for its type.
 %% Requirements: 8.1, 8.2, 8.3, 8.4
 -spec validate_callback(CallbackType, Callback) -> ok | {error, Reason} when
-    CallbackType :: on_data | on_progress | on_profile | on_profile_events,
+    CallbackType :: on_data | on_progress | on_profile | on_profile_events | on_log,
     Callback :: function() | undefined | term(),
     Reason ::
         {invalid_callback_arity, Expected :: non_neg_integer(), Actual :: non_neg_integer()}
@@ -1424,7 +1428,9 @@ validate_callback(CallbackType, Callback) when is_function(Callback) ->
             % fun(ProfileInfo) -> ok | {error, Reason}
             on_profile -> 1;
             % fun(ProfileEvents) -> ok | {error, Reason}
-            on_profile_events -> 1
+            on_profile_events -> 1;
+            % fun(LogEntry) -> ok | {error, Reason}
+            on_log -> 1
         end,
 
     %% Get actual arity of the callback
@@ -1453,7 +1459,7 @@ validate_callback(_CallbackType, NotAFunction) ->
         | {invalid_callback_type, term()}.
 validate_prepared_request(PreparedRequest) ->
     %% List of callback types to validate
-    CallbackTypes = [on_data, on_progress, on_profile, on_profile_events],
+    CallbackTypes = [on_data, on_progress, on_profile, on_profile_events, on_log],
 
     %% Validate each callback if present
     validate_callbacks(CallbackTypes, PreparedRequest).
@@ -1553,6 +1559,7 @@ build_active_query_state(
     OnProgress = maps:get(on_progress, PreparedRequest, fun(_) -> ok end),
     OnProfile = maps:get(on_profile, PreparedRequest, fun(_) -> ok end),
     OnProfileEvents = maps:get(on_profile_events, PreparedRequest, fun(_) -> ok end),
+    OnLog = maps:get(on_log, PreparedRequest, fun default_on_log_callback/1),
     %% Always store on_data — use default callback when user doesn't provide one
     OnData =
         case maps:find(on_data, PreparedRequest) of
@@ -1571,6 +1578,7 @@ build_active_query_state(
         on_progress => OnProgress,
         on_profile => OnProfile,
         on_profile_events => OnProfileEvents,
+        on_log => OnLog,
         compression_opts => CompressionOpts
     }.
 
@@ -2930,6 +2938,13 @@ process_single_event({start, server_exception}, EosAcc, NmAcc, _ExAcc, Acc) ->
         exception_info => #{},
         current_block_type => server_exception
     }};
+process_single_event({start, server_log}, EosAcc, NmAcc, ExAcc, Acc) ->
+    {EosAcc, NmAcc, ExAcc, Acc#{
+        current_block_type => server_log,
+        log_columns => #{},
+        log_column_order => [],
+        log_current_column => undefined
+    }};
 process_single_event({start, Type}, EosAcc, NmAcc, ExAcc, Acc) ->
     {EosAcc, NmAcc, ExAcc, Acc#{current_block_type => Type}};
 process_single_event({'end', server_end_of_stream}, _EosAcc, NmAcc, ExAcc, Acc) ->
@@ -2940,6 +2955,13 @@ process_single_event({'end', server_exception}, EosAcc, NmAcc, _ExAcc, Acc) ->
 process_single_event({'end', Type}, EosAcc, NmAcc, ExAcc, Acc) when
     Type =:= server_data; Type =:= server_totals; Type =:= server_extremes
 ->
+    {EosAcc, NmAcc, ExAcc, Acc#{current_block_type => undefined}};
+process_single_event({'end', server_log}, EosAcc, NmAcc, ExAcc, Acc) ->
+    LogColumns = maps:get(log_columns, Acc, #{}),
+    LogColumnOrder = maps:get(log_column_order, Acc, []),
+    OnLogCallback = maps:get(on_log_callback, Acc, fun(_) -> ok end),
+    Entries = assemble_log_entries(LogColumnOrder, LogColumns),
+    dispatch_log_entries(OnLogCallback, Entries),
     {EosAcc, NmAcc, ExAcc, Acc#{current_block_type => undefined}};
 process_single_event({'end', _Type}, EosAcc, NmAcc, ExAcc, Acc) ->
     {EosAcc, NmAcc, ExAcc, Acc#{current_block_type => undefined}};
@@ -2976,6 +2998,13 @@ process_single_event({data, column, ColumnMeta}, EosAcc, NmAcc, ExAcc, Acc) ->
                 current_column_name => ColName,
                 current_column_type => ColType
             }};
+        server_log ->
+            ColName = maps:get(name, ColumnMeta, undefined),
+            LogColumnOrder = maps:get(log_column_order, Acc, []),
+            {EosAcc, NmAcc, ExAcc, Acc#{
+                log_current_column => ColName,
+                log_column_order => LogColumnOrder ++ [ColName]
+            }};
         _ ->
             {EosAcc, NmAcc, ExAcc, Acc}
     end;
@@ -2983,6 +3012,12 @@ process_single_event({data, column_value, Value}, EosAcc, NmAcc, ExAcc, Acc) ->
     case maps:get(current_block_type, Acc, undefined) of
         server_data ->
             dispatch_column_value(Value, EosAcc, NmAcc, ExAcc, Acc);
+        server_log ->
+            LogCurrentColumn = maps:get(log_current_column, Acc, undefined),
+            LogColumns = maps:get(log_columns, Acc, #{}),
+            ExistingValues = maps:get(LogCurrentColumn, LogColumns, []),
+            NewLogColumns = LogColumns#{LogCurrentColumn => ExistingValues ++ [Value]},
+            {EosAcc, NmAcc, ExAcc, Acc#{log_columns => NewLogColumns}};
         _ ->
             {EosAcc, NmAcc, ExAcc, Acc}
     end;
@@ -3079,6 +3114,18 @@ finalize_streaming_end(Acc) ->
     {ok, FinalUserAcc} = Callback('end', UserAcc),
     Acc#{user_acc => FinalUserAcc}.
 
+%% @doc Default on_log callback that logs each server log entry via ?LOG_DEBUG.
+%% Used when no user-provided on_log callback is specified.
+-spec default_on_log_callback(LogEntry :: map()) -> ok.
+default_on_log_callback(LogEntry) ->
+    ?LOG_DEBUG("ClickHouse server log: ~ts", [maps:get(<<"text">>, LogEntry, <<>>)], #{
+        source => maps:get(<<"source">>, LogEntry, <<>>),
+        priority => maps:get(<<"priority">>, LogEntry, 0),
+        ch_query_id => maps:get(<<"query_id">>, LogEntry, <<>>),
+        ch_host => maps:get(<<"host_name">>, LogEntry, <<>>)
+    }),
+    ok.
+
 %% @doc Map parser exception field names to API names and accumulate.
 -spec accumulate_exception_field(atom(), term(), map()) -> map().
 accumulate_exception_field(Field, Value, Acc) ->
@@ -3136,6 +3183,7 @@ init_acc_state(ActiveQueryState) ->
             UserCallback when is_function(UserCallback) ->
                 {UserCallback, maps:get(accumulator, ActiveQueryState, undefined)}
         end,
+    OnLogCallback = maps:get(on_log, ActiveQueryState, fun default_on_log_callback/1),
     #{
         current_column => undefined,
         current_column_name => undefined,
@@ -3144,8 +3192,52 @@ init_acc_state(ActiveQueryState) ->
         exception_info => undefined,
         rows_written => 0,
         on_data_callback => Callback,
-        user_acc => UserAcc
+        user_acc => UserAcc,
+        %% Log accumulator fields for server_log block processing
+        log_columns => #{},
+        log_column_order => [],
+        log_current_column => undefined,
+        on_log_callback => OnLogCallback
     }.
+
+%% @doc Assemble log entries from column-oriented data into row-oriented maps.
+%% Transposes #{col => [vals]} into a list of maps where each map represents one row.
+-spec assemble_log_entries(ColumnOrder :: [binary()], Columns :: map()) -> [map()].
+assemble_log_entries([], _Columns) ->
+    [];
+assemble_log_entries(_ColumnOrder, Columns) when map_size(Columns) =:= 0 ->
+    [];
+assemble_log_entries(ColumnOrder, Columns) ->
+    %% Determine number of rows from the first column's value list
+    FirstCol = hd(ColumnOrder),
+    NumRows = length(maps:get(FirstCol, Columns, [])),
+    lists:map(
+        fun(RowIdx) ->
+            lists:foldl(
+                fun(ColName, RowMap) ->
+                    Values = maps:get(ColName, Columns, []),
+                    RowMap#{ColName => lists:nth(RowIdx, Values)}
+                end,
+                #{},
+                ColumnOrder
+            )
+        end,
+        lists:seq(1, NumRows)
+    ).
+
+%% @doc Dispatch assembled log entries to the on_log callback.
+%% Invokes invoke_optional_callback/2 for each entry. Errors in individual
+%% callbacks do not prevent subsequent entries from being dispatched.
+-spec dispatch_log_entries(Callback :: function(), Entries :: [map()]) -> ok.
+dispatch_log_entries(_Callback, []) ->
+    ok;
+dispatch_log_entries(Callback, Entries) ->
+    lists:foreach(
+        fun(Entry) ->
+            invoke_optional_callback(Callback, Entry)
+        end,
+        Entries
+    ).
 
 %% @doc Build query result from accumulated data.
 %% Always reads from user_acc — the default callback or user callback

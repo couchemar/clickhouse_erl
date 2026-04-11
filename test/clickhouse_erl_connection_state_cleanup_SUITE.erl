@@ -33,7 +33,7 @@ end_per_suite(_Config) ->
     ok.
 
 %% Test that active_query_state is cleared after a successful query
-active_query_state_cleared_after_query(Config) ->
+active_query_state_cleared_after_query(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     PreparedRequest1 = #{
@@ -58,7 +58,7 @@ active_query_state_cleared_after_query(Config) ->
     ok.
 
 %% Test that streaming query state doesn't leak to batch query
-streaming_to_batch_no_state_leak(Config) ->
+streaming_to_batch_no_state_leak(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     StreamingCallback = fun
@@ -99,7 +99,7 @@ streaming_to_batch_no_state_leak(Config) ->
     ok.
 
 %% Test that batch query state doesn't leak to streaming query
-batch_to_streaming_no_state_leak(Config) ->
+batch_to_streaming_no_state_leak(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     PreparedRequest1 = #{
@@ -139,7 +139,7 @@ batch_to_streaming_no_state_leak(Config) ->
     ok.
 
 %% Test multiple alternations between streaming and batch modes
-multiple_mode_alternations(Config) ->
+multiple_mode_alternations(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     StreamingCallback = fun
@@ -182,7 +182,7 @@ multiple_mode_alternations(Config) ->
     ok.
 
 %% Test that different callbacks don't leak between streaming queries
-different_callbacks_no_leak(Config) ->
+different_callbacks_no_leak(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     CountCallback = fun
@@ -226,7 +226,7 @@ different_callbacks_no_leak(Config) ->
     ok.
 
 %% Test that optional callbacks don't leak between queries
-optional_callbacks_no_leak(Config) ->
+optional_callbacks_no_leak(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     ProgressCalled = erlang:make_ref(),

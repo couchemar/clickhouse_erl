@@ -19,8 +19,11 @@
     query/3,
     insert/3,
     insert/4,
-    cancel_query/2
+    cancel_query/2,
+    add_optional_callbacks/2
 ]).
+
+-ignore_xref([add_optional_callbacks/2]).
 
 start(_StartType, _StartArgs) ->
     clickhouse_erl_sup:start_link().
@@ -208,5 +211,5 @@ add_optional_callbacks(PreparedRequest, Options) ->
             end
         end,
         PreparedRequest,
-        [on_data, initial_accumulator, on_progress, on_profile, on_profile_events]
+        [on_data, initial_accumulator, on_progress, on_profile, on_profile_events, on_log]
     ).

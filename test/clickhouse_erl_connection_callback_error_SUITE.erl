@@ -31,7 +31,7 @@ end_per_suite(_Config) ->
     ok.
 
 %% Test that callback returning {error, Reason} is properly handled
-callback_returns_error(Config) ->
+callback_returns_error(_Config) ->
     Options = #{
         username => test_helpers:test_username(),
         password => test_helpers:test_password(),
@@ -68,7 +68,7 @@ callback_returns_error(Config) ->
     ok.
 
 %% Test that callback crash is properly handled
-callback_crashes(Config) ->
+callback_crashes(_Config) ->
     Options = #{
         username => test_helpers:test_username(),
         password => test_helpers:test_password(),
@@ -105,7 +105,7 @@ callback_crashes(Config) ->
     ok.
 
 %% Test that callback returning invalid value is properly handled
-callback_returns_invalid_value(Config) ->
+callback_returns_invalid_value(_Config) ->
     Options = #{
         username => test_helpers:test_username(),
         password => test_helpers:test_password(),
@@ -142,7 +142,7 @@ callback_returns_invalid_value(Config) ->
     ok.
 
 %% Test that callback error clears active query state
-callback_error_clears_query_state(Config) ->
+callback_error_clears_query_state(_Config) ->
     Options = #{
         username => test_helpers:test_username(),
         password => test_helpers:test_password(),
@@ -179,7 +179,7 @@ callback_error_clears_query_state(Config) ->
     ok.
 
 %% Test that timeout timer is cancelled on callback error
-callback_error_cancels_timer(Config) ->
+callback_error_cancels_timer(_Config) ->
     Options = #{
         username => test_helpers:test_username(),
         password => test_helpers:test_password(),

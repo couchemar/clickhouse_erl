@@ -19,7 +19,7 @@ end_per_suite(_Config) ->
     ok.
 
 %% Test that PONG parsing works with event-driven parser during handshake
-pong_parsing_with_event_parser(Config) ->
+pong_parsing_with_event_parser(_Config) ->
     case test_helpers:connect() of
         {ok, Conn} ->
             test_helpers:disconnect(Conn),
