@@ -31,7 +31,7 @@ end_per_suite(_Config) ->
     ok.
 
 %% Test simple array round trip with ClickHouse
-simple_array_roundtrip(Config) ->
+simple_array_roundtrip(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_array_simple">>),
@@ -69,7 +69,7 @@ simple_array_roundtrip(Config) ->
     ok.
 
 %% Test array of strings
-array_string_roundtrip(Config) ->
+array_string_roundtrip(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_array_string">>),
@@ -111,7 +111,7 @@ array_string_roundtrip(Config) ->
     ok.
 
 %% Test nested arrays
-nested_array_roundtrip(Config) ->
+nested_array_roundtrip(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_array_nested">>),
@@ -152,7 +152,7 @@ nested_array_roundtrip(Config) ->
     ok.
 
 %% Test array of tuples
-array_of_tuples_roundtrip(Config) ->
+array_of_tuples_roundtrip(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_array_of_tuples">>),
@@ -193,7 +193,7 @@ array_of_tuples_roundtrip(Config) ->
     ok.
 
 %% Test empty arrays
-empty_array_roundtrip(Config) ->
+empty_array_roundtrip(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_array_empty">>),

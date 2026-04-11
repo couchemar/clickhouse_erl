@@ -19,6 +19,7 @@ This is a low-level library focused on protocol implementation. For connection p
 - **Comprehensive Type System**: Primitives, temporals, decimals, enums, network types, composites
 - **OTP Supervision**: Fault-isolated connections
 - **Streaming**: Large result set handling with `on_data` callbacks
+- **Server Logs**: Receive ClickHouse server log entries via `on_log` callback ([guide](doc/server_logs.md))
 
 ## Installation
 
@@ -121,6 +122,7 @@ Array, Tuple, Map, Nullable, LowCardinality
 - [Composite Types Guide](doc/composite_types_guide.md) - Complex types
 - [INSERT Guide](doc/insert_guide.md) - Data insertion
 - [Error Handling](doc/error_handling.md) - Error types and handling
+- [Server Logs Guide](doc/server_logs.md) - Receiving server log entries
 
 ## Testing
 

@@ -31,7 +31,7 @@ end_per_suite(_Config) ->
     ok.
 
 %% Test Array(Nullable(String)) round trip
-array_nullable_string_roundtrip(Config) ->
+array_nullable_string_roundtrip(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_array_nullable_string">>),
@@ -79,7 +79,7 @@ array_nullable_string_roundtrip(Config) ->
     ok.
 
 %% Test Tuple(Array(String), Map(String, Int64)) round trip
-tuple_array_map_roundtrip(Config) ->
+tuple_array_map_roundtrip(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_tuple_array_map">>),
@@ -127,7 +127,7 @@ tuple_array_map_roundtrip(Config) ->
     ok.
 
 %% Test Array(Tuple(String, Int64)) round trip
-array_tuple_roundtrip(Config) ->
+array_tuple_roundtrip(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_array_tuple">>),
@@ -175,7 +175,7 @@ array_tuple_roundtrip(Config) ->
     ok.
 
 %% Test Map(String, Array(Int64)) round trip
-map_string_array_roundtrip(Config) ->
+map_string_array_roundtrip(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_map_string_array">>),
@@ -223,7 +223,7 @@ map_string_array_roundtrip(Config) ->
     ok.
 
 %% Test deeply nested structure (4 levels)
-deeply_nested_roundtrip(Config) ->
+deeply_nested_roundtrip(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_deeply_nested">>),

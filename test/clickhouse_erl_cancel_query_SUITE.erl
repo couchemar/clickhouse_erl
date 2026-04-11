@@ -19,7 +19,7 @@ end_per_suite(_Config) ->
     ok.
 
 %% Test cancel_query/1 with no active query
-cancel_query_no_active_query(Config) ->
+cancel_query_no_active_query(_Config) ->
     {ok, Conn} = test_helpers:connect(),
     Result = clickhouse_erl:cancel_query(Conn),
     {error, no_active_query} = Result,
@@ -27,7 +27,7 @@ cancel_query_no_active_query(Config) ->
     ok.
 
 %% Test cancel_query/1 with active query
-cancel_query_active_query(Config) ->
+cancel_query_active_query(_Config) ->
     {ok, Conn} = test_helpers:connect(),
     Parent = self(),
     spawn_link(fun() ->
@@ -49,7 +49,7 @@ cancel_query_active_query(Config) ->
     ok.
 
 %% Test that cancel_query/2 still works (backward compatibility)
-cancel_query_with_id(Config) ->
+cancel_query_with_id(_Config) ->
     {ok, Conn} = test_helpers:connect(),
     QueryId = <<"test_cancel_", (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
     Parent = self(),
