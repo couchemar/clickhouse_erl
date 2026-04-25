@@ -295,7 +295,7 @@ test_concurrent_query_rejection() ->
     Result2 = clickhouse_erl_connection:query(Pid, PreparedRequest2),
 
     %% Verify second query is rejected with correct error message
-    ?assertEqual({error, {protocol_error, "Connection busy with another query"}}, Result2),
+    ?assertEqual({error, {connection_error, query_in_progress}}, Result2),
 
     %% Verify first query state is unaffected
     {ok, InfoAfter} = clickhouse_erl_connection:get_connection_info(Pid),
@@ -484,7 +484,7 @@ test_connection_unavailability_during_cancellation() ->
     Result2 = clickhouse_erl_connection:query(Pid, PreparedRequest2),
 
     %% Verify new query is rejected with correct error message
-    ?assertEqual({error, {protocol_error, "Connection busy with another query"}}, Result2),
+    ?assertEqual({error, {connection_error, query_in_progress}}, Result2),
 
     %% Verify active query state is still the cancelled query (unaffected by rejection)
     {ok, InfoAfterRejection} = clickhouse_erl_connection:get_connection_info(Pid),

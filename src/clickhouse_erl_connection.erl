@@ -504,7 +504,25 @@
     % Default on_log callback (exported for testing and fun reference)
     default_on_log_callback/1,
     % ActiveQueryState builder (exported for testing)
-    build_active_query_state/7
+    build_active_query_state/7,
+    % Streaming insert loop helpers (exported for testing)
+    streaming_loop/5,
+    check_server_response/2,
+    % Block encoding and sending (exported for testing)
+    encode_and_send_block/2,
+    % Streaming insert API (exported for testing)
+    get_push_session/1,
+    check_push_session_valid/2,
+    handle_send_data/4,
+    send_and_check/4,
+    handle_finish_streaming/2,
+    streaming_insert/2,
+    start_streaming_insert/2,
+    send_data/3,
+    finish_streaming_insert/2,
+    % Connection state management (exported for testing)
+    clear_active_query_state/1,
+    clear_active_query_state/2
 ]).
 
 -ignore_xref([
@@ -522,7 +540,22 @@
     build_query_result/1,
     default_on_data_callback/2,
     default_on_log_callback/1,
-    build_active_query_state/7
+    build_active_query_state/7,
+    get_push_session/1,
+    check_push_session_valid/2,
+    handle_send_data/4,
+    send_and_check/4,
+    handle_finish_streaming/2,
+    safe_invoke_on_input/3,
+    encode_and_send_block/2,
+    streaming_loop/5,
+    check_server_response/2,
+    streaming_insert/2,
+    start_streaming_insert/2,
+    send_data/3,
+    finish_streaming_insert/2,
+    clear_active_query_state/1,
+    clear_active_query_state/2
 ]).
 
 %% gen_server callbacks
@@ -635,8 +668,15 @@
     connection_options/0,
     connection_info/0,
     connection_error/0,
-    default_callback_acc/0
+    default_callback_acc/0,
+    streaming_insert_result/0
 ]).
+
+-type streaming_insert_result() :: #{
+    rows_inserted := non_neg_integer(),
+    blocks_sent := non_neg_integer(),
+    elapsed_time := non_neg_integer()
+}.
 
 %%%===================================================================
 %%% Public API
@@ -857,6 +897,67 @@ query(Connection, PreparedRequest) ->
 insert(Connection, PreparedRequest) ->
     gen_server:call(Connection, {insert, PreparedRequest}, 30000).
 
+%% @doc Execute a streaming INSERT query using pull-based pattern.
+%%
+%% @param Connection Connection manager pid.
+%% @param PreparedRequest Prepared streaming insert request with `on_input' callback.
+%% @returns {ok, Result} or {error, Reason}.
+-spec streaming_insert(Connection, PreparedRequest) -> {ok, Result} | {error, Reason} when
+    Connection :: pid(),
+    PreparedRequest :: map(),
+    Result :: #{
+        rows_inserted := non_neg_integer(),
+        blocks_sent := non_neg_integer(),
+        elapsed_time := non_neg_integer()
+    },
+    Reason :: connection_error().
+streaming_insert(Connection, PreparedRequest) ->
+    gen_server:call(Connection, {streaming_insert, PreparedRequest}, 30000).
+
+%% @doc Start a push-based streaming insert session.
+%%
+%% @param Connection Connection manager pid.
+%% @param PreparedRequest Prepared streaming insert request with `columns'.
+%% @returns {ok, StreamRef} or {error, Reason}.
+-spec start_streaming_insert(Connection, PreparedRequest) -> {ok, StreamRef} | {error, Reason} when
+    Connection :: pid(),
+    PreparedRequest :: map(),
+    StreamRef :: term(),
+    Reason :: connection_error().
+start_streaming_insert(Connection, PreparedRequest) ->
+    gen_server:call(Connection, {start_streaming_insert, PreparedRequest}, 30000).
+
+%% @doc Send a data block during a push-based streaming insert session.
+%%
+%% @param Connection Connection manager pid.
+%% @param StreamRef Stream reference from start_streaming_insert/2.
+%% @param ColumnData List of column data maps.
+%% @returns ok or {error, Reason}.
+-spec send_data(Connection, StreamRef, ColumnData) -> ok | {error, Reason} when
+    Connection :: pid(),
+    StreamRef :: term(),
+    ColumnData :: [map()],
+    Reason :: connection_error() | validation_error | streaming_error.
+send_data(Connection, StreamRef, ColumnData) ->
+    gen_server:call(Connection, {send_data, StreamRef, ColumnData}, 30000).
+
+%% @doc Finish a push-based streaming insert session.
+%%
+%% @param Connection Connection manager pid.
+%% @param StreamRef Stream reference from start_streaming_insert/2.
+%% @returns {ok, Result} or {error, Reason}.
+-spec finish_streaming_insert(Connection, StreamRef) -> {ok, Result} | {error, Reason} when
+    Connection :: pid(),
+    StreamRef :: term(),
+    Result :: #{
+        rows_inserted := non_neg_integer(),
+        blocks_sent := non_neg_integer(),
+        elapsed_time := non_neg_integer()
+    },
+    Reason :: connection_error() | streaming_error.
+finish_streaming_insert(Connection, StreamRef) ->
+    gen_server:call(Connection, {finish_streaming_insert, StreamRef}, 30000).
+
 %% @doc Request cancellation of the currently active query.
 %%
 %% This is a convenience function for cancelling the active query when you
@@ -1067,6 +1168,60 @@ handle_call({insert, PreparedRequest}, From, State) ->
         {error, Reason} ->
             {reply, {error, Reason}, State}
     end;
+handle_call({streaming_insert, PreparedRequest}, _From, State) ->
+    case handle_streaming_insert(State, PreparedRequest) of
+        {ok, Result, NewState} ->
+            {reply, {ok, Result}, NewState};
+        {error, Reason, NewState} ->
+            {reply, {error, Reason}, NewState};
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
+    end;
+handle_call({start_streaming_insert, PreparedRequest}, _From, State) ->
+    case handle_start_streaming_insert(State, PreparedRequest) of
+        {ok, StreamRef, NewState} ->
+            {reply, {ok, StreamRef}, NewState};
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
+    end;
+handle_call({send_data, StreamRef, ColumnData}, _From, State) ->
+    case get_push_session(State) of
+        {error, Reason} ->
+            {reply, {error, Reason}, State};
+        {ok, ActiveState, SessionState} ->
+            case check_push_session_valid(SessionState, StreamRef) of
+                {error, Reason} ->
+                    {reply, {error, Reason}, State};
+                ok ->
+                    handle_send_data(State, ActiveState, SessionState, ColumnData)
+            end
+    end;
+handle_call({finish_streaming_insert, StreamRef}, _From, State) ->
+    case get_push_session(State) of
+        {error, Reason} ->
+            {reply, {error, Reason}, State};
+        {ok, _ActiveState, SessionState} ->
+            case maps:get(session_failed, SessionState, false) of
+                {true, FailReason} ->
+                    %% Network errors transition to error state;
+                    %% other failures (timeout, cancellation, server exception)
+                    %% transition to ready if TCP is still open
+                    TargetState =
+                        case FailReason of
+                            {network_error, _} -> error;
+                            _ -> ready
+                        end,
+                    NewState = clear_active_query_state(State, TargetState),
+                    {reply, {error, FailReason}, NewState};
+                false ->
+                    case maps:get(stream_ref, SessionState) of
+                        StreamRef ->
+                            handle_finish_streaming(State, SessionState);
+                        _ ->
+                            {reply, {error, {validation_error, invalid_stream_ref}}, State}
+                    end
+            end
+    end;
 handle_call({cancel_active_query}, _From, State) ->
     ?LOG_DEBUG("Cancel active query requested", []),
     do_cancel_query(State, undefined);
@@ -1169,6 +1324,32 @@ handle_info({query_timeout, QueryId}, State) ->
                 _OtherQueryId ->
                     %% Timeout for a different query, ignore
                     {noreply, State}
+            end
+    end;
+handle_info({streaming_timeout, StreamRef}, State) ->
+    %% Handle streaming timeout for push-based mode
+    case State#connection_state.active_query_state of
+        undefined ->
+            {noreply, State};
+        ActiveQueryState ->
+            case maps:get(push_session, ActiveQueryState, undefined) of
+                undefined ->
+                    {noreply, State};
+                SessionState ->
+                    case maps:get(stream_ref, SessionState) of
+                        StreamRef ->
+                            %% Mark session as failed with reason
+                            NewSessionState = SessionState#{
+                                session_failed => {true, {timeout_error, streaming_insert}}
+                            },
+                            {noreply, State#connection_state{
+                                active_query_state = ActiveQueryState#{
+                                    push_session => NewSessionState
+                                }
+                            }};
+                        _ ->
+                            {noreply, State}
+                    end
             end
     end;
 handle_info({tcp, Socket, Data}, State) ->
@@ -1972,11 +2153,25 @@ cancel_active_query(State, ActiveQueryState) ->
 
                     %% Update active query state but do not clear it yet
                     %% We need to wait for SERVER_END_OF_STREAM
-                    NewActiveQueryState = ActiveQueryState#{
+                    %% Also handle push session if present
+                    NewActiveQueryState0 = ActiveQueryState#{
                         cancelled => true,
                         replied => true,
                         timer_ref => undefined
                     },
+
+                    %% If this is a push session, mark it as failed with cancellation reason
+                    NewActiveQueryState =
+                        case maps:get(push_session, ActiveQueryState, undefined) of
+                            undefined ->
+                                NewActiveQueryState0;
+                            PushSession ->
+                                NewPushSession = PushSession#{
+                                    session_failed => {true, {query_cancelled, QueryId}}
+                                },
+                                NewActiveQueryState0#{push_session => NewPushSession}
+                        end,
+
                     {ok, State#connection_state{active_query_state = NewActiveQueryState}};
                 true ->
                     %% Already replied (e.g. timeout happened simultaneously)
@@ -2047,6 +2242,88 @@ encode_blank_data_block(CompressionOpts) ->
 
     %% Assemble packet: PacketType + TempTableName (uncompressed) + BlockData (compressed)
     iolist_to_binary([PacketType, TempTableName, CompressedBlockData]).
+
+%% @doc Encode column data as a CLIENT_DATA block and send it over the TCP socket.
+%%
+%% This is the shared helper used by both single-block insert and streaming insert.
+%% It builds a data_block map, encodes it via the protocol module, splits the encoded
+%% binary into temp table name (uncompressed) and block data, compresses the block data
+%% if compression is enabled, assembles the CLIENT_DATA packet, and sends it.
+%%
+%% @param State The connection state (provides socket, negotiated version, compression opts)
+%% @param ColumnData List of column data maps
+%%   #{name => binary(), type => binary(), data => [term()]}
+%% @returns ok | {error, Reason}
+-spec encode_and_send_block(state(), [map()]) -> ok | {error, term()}.
+encode_and_send_block(State, ColumnData) ->
+    Socket = State#connection_state.socket,
+    NegotiatedVersion = State#connection_state.negotiated_version,
+    CompressionOpts = State#connection_state.compression_opts,
+    NumColumns = length(ColumnData),
+    NumRows =
+        case ColumnData of
+            [] -> 0;
+            [#{data := Data} | _] -> length(Data)
+        end,
+    DataBlock = #{columns => NumColumns, rows => NumRows, column_data => ColumnData},
+    maybe
+        {ok, EncodedDataBlock} ?=
+            clickhouse_erl_protocol_data_block:encode_data_block(
+                DataBlock, NegotiatedVersion
+            ),
+        %% encode_data_block returns [TempTableName, BlockInfo, NumColumns, NumRows, ColumnData].
+        %% Extract block data (everything after temp table name) for compression.
+        FullDataBlockBin = iolist_to_binary(EncodedDataBlock),
+        {ok, _DecodedTempTableName, BlockDataOnly} =
+            clickhouse_erl_types_primitive:decode_string(FullDataBlockBin),
+        %% Compress block data if enabled
+        CompressedBlockData =
+            case clickhouse_erl_compression:compress_data_block(BlockDataOnly, CompressionOpts) of
+                {ok, Compressed} ->
+                    Compressed;
+                {error, CompressReason} ->
+                    ?LOG_ERROR("Failed to compress data block", #{reason => CompressReason}),
+                    BlockDataOnly
+            end,
+        %% Assemble and send CLIENT_DATA packet
+        TempTableNameEnc = clickhouse_erl_types_primitive:encode_string(""),
+        DataPacket = <<?CLIENT_DATA:8, TempTableNameEnc/binary, CompressedBlockData/binary>>,
+        ok ?= gen_tcp:send(Socket, DataPacket),
+        ?LOG_DEBUG("Data block sent", #{columns => NumColumns, rows => NumRows}),
+        ok
+    else
+        {error, Reason} when is_tuple(Reason) ->
+            {error, {protocol_error, {data_block_encoding, Reason}}};
+        {error, Reason} ->
+            {error, {network_error, Reason}}
+    end.
+
+%% @doc Validate a streaming block against original column definitions.
+%% Checks row count consistency within the data and column name matching
+%% against original definitions.
+%%
+%% @param ColumnData The column data from the callback or send_data
+%% @param OriginalDefs The original column definitions from the streaming insert request
+%% @returns ok | {error, {validation_error, {row_count_mismatch, Details}}}
+%%          | {error, {validation_error, {column_name_mismatch, Expected, Got}}}
+-spec validate_streaming_block([map()], [map()]) -> ok | {error, {validation_error, term()}}.
+validate_streaming_block(ColumnData, OriginalDefs) when
+    is_list(ColumnData), is_list(OriginalDefs)
+->
+    clickhouse_erl_streaming_helpers:validate_streaming_block(ColumnData, OriginalDefs).
+
+%% @doc Validate that column names in the data match the original definitions.
+%%
+%% @param ColumnData The column data to validate
+%% @param OriginalDefs The original column definitions
+%% @returns ok | {error, {validation_error, {column_name_mismatch, Expected, Got}}}
+-spec merge_column_types([map()], [map()]) -> [map()].
+merge_column_types(ColumnData, ColumnDefs) ->
+    clickhouse_erl_streaming_helpers:merge_column_types(ColumnData, ColumnDefs).
+
+-spec has_rows([map()]) -> boolean().
+has_rows(ColumnData) ->
+    clickhouse_erl_streaming_helpers:has_rows(ColumnData).
 
 %% @doc Establish TCP connection to ClickHouse server
 -spec establish_tcp_connection(State) -> {ok, NewState} | {error, Reason} when
@@ -2523,56 +2800,10 @@ execute_insert_with_validated_params(
         BlankBlockAfterQuery = encode_blank_data_block(State#connection_state.compression_opts),
         ok ?= gen_tcp:send(Socket, [QueryPacket, BlankBlockAfterQuery]),
         ?LOG_DEBUG("Query packet and blank block sent successfully~n", []),
-        %% Step 4: Encode data block
+        %% Step 4: Encode and send data block using shared helper
         Input = maps:get(input, PreparedRequest),
-        NumColumns = maps:get(num_columns, PreparedRequest),
+        ok ?= encode_and_send_block(State, Input),
         NumRows = maps:get(num_rows, PreparedRequest),
-        DataBlock = #{columns => NumColumns, rows => NumRows, column_data => Input},
-        {ok, EncodedDataBlock} ?=
-            clickhouse_erl_protocol_data_block:encode_data_block(
-                DataBlock, NegotiatedVersion
-            ),
-        %% CRITICAL: encode_data_block returns
-        %% [TempTableName, BlockInfo, NumColumns, NumRows, ColumnData]
-        %% We need to extract ONLY the block data
-        %% (BlockInfo + NumColumns + NumRows + ColumnData)
-        %% and compress that, keeping TempTableName uncompressed.
-        %% This matches the pattern in encode_blank_data_block.
-
-        %% Convert to binary to extract temp table name
-        FullDataBlockBin = iolist_to_binary(EncodedDataBlock),
-        ?LOG_DEBUG("Full data block size: ~p bytes~n", [byte_size(FullDataBlockBin)]),
-        %% Decode temp table name to find where block data starts
-        {ok, _TempTableName, BlockDataOnly} =
-            clickhouse_erl_types_primitive:decode_string(FullDataBlockBin),
-        ?LOG_DEBUG("Block data only size (after removing temp table name): ~p bytes~n", [
-            byte_size(BlockDataOnly)
-        ]),
-        %% Apply compression only to block data (BlockInfo + columns + rows)
-        CompressedBlockData =
-            case
-                clickhouse_erl_compression:compress_data_block(
-                    BlockDataOnly, State#connection_state.compression_opts
-                )
-            of
-                {ok, Compressed} ->
-                    ?LOG_DEBUG("Compressed block data: ~p -> ~p bytes~n", [
-                        byte_size(BlockDataOnly), byte_size(Compressed)
-                    ]),
-                    Compressed;
-                {error, CompressReason} ->
-                    ?LOG_ERROR("Failed to compress data block", #{reason => CompressReason}),
-                    %% Fall back to uncompressed on error
-                    BlockDataOnly
-            end,
-        %% Step 5: Send data block with uncompressed temp table name + compressed block data
-        TempTableName = clickhouse_erl_types_primitive:encode_string(""),
-        DataPacket = <<?CLIENT_DATA:8, TempTableName/binary, CompressedBlockData/binary>>,
-        ?LOG_DEBUG(
-            "Sending data packet: type=~p, temp_table_name_size=~p, compressed_block_size=~p~n",
-            [?CLIENT_DATA, byte_size(TempTableName), byte_size(CompressedBlockData)]
-        ),
-        ok ?= gen_tcp:send(Socket, DataPacket),
         ?LOG_DEBUG("Data block sent successfully (~p rows)~n", [NumRows]),
         %% Step 6: Send final blank block
         %% CRITICAL: Blank block must be compressed if compression is enabled
@@ -2629,6 +2860,311 @@ complete_query(State, Reply) ->
             {noreply, CompletedState}
     end.
 
+%% @doc Handle pull-based streaming insert request.
+%% Validates inputs, sends query, runs streaming loop, and finalizes.
+-spec handle_streaming_insert(State, PreparedRequest) ->
+    {ok, Result, NewState} | {error, Reason, NewState} | {error, Reason}
+when
+    State :: state(),
+    PreparedRequest :: map(),
+    Result :: streaming_insert_result(),
+    NewState :: state(),
+    Reason :: term().
+handle_streaming_insert(State, PreparedRequest) ->
+    maybe
+        ok ?= check_connection_ready(State),
+        ok ?= check_no_active_query(State),
+        ok ?= validate_prepared_request(PreparedRequest),
+        ok ?= validate_on_input_present(PreparedRequest),
+        ok ?= validate_columns_not_empty(PreparedRequest),
+        {ok, NewState} ?= send_query_and_blank_block(State, PreparedRequest),
+        StateWithParser = ensure_parser_state(NewState),
+        run_streaming_loop(StateWithParser, PreparedRequest)
+    end.
+
+%% @doc Handle push-based start_streaming_insert request.
+%% Validates inputs, sends query, creates push session state.
+-spec handle_start_streaming_insert(State, PreparedRequest) ->
+    {ok, StreamRef, NewState} | {error, Reason}
+when
+    State :: state(),
+    PreparedRequest :: map(),
+    StreamRef :: reference(),
+    NewState :: state(),
+    Reason :: term().
+handle_start_streaming_insert(State, PreparedRequest) ->
+    maybe
+        ok ?= check_connection_ready(State),
+        ok ?= check_no_active_query(State),
+        ok ?= validate_prepared_request(PreparedRequest),
+        {ok, NewState} ?= send_query_and_blank_block(State, PreparedRequest),
+        StateWithParser = ensure_parser_state(NewState),
+        set_passive_and_drain(StateWithParser),
+        {ok, StreamRef, FinalState} ?= create_push_session(StateWithParser, PreparedRequest),
+        {ok, StreamRef, FinalState}
+    end.
+
+%% @doc Check that no active query is in progress.
+-spec check_no_active_query(state()) -> ok | {error, term()}.
+check_no_active_query(State) ->
+    case State#connection_state.active_query_state of
+        undefined -> ok;
+        _ -> {error, {connection_error, query_in_progress}}
+    end.
+
+%% @doc Validate that on_input callback is present in the request.
+-spec validate_on_input_present(map()) -> ok | {error, term()}.
+validate_on_input_present(PreparedRequest) ->
+    case maps:find(on_input, PreparedRequest) of
+        {ok, _} -> ok;
+        error -> {error, {validation_error, missing_on_input_callback}}
+    end.
+
+%% @doc Validate that columns list is not empty.
+-spec validate_columns_not_empty(map()) -> ok | {error, term()}.
+validate_columns_not_empty(PreparedRequest) ->
+    case maps:get(columns, PreparedRequest, []) of
+        [] -> {error, {validation_error, empty_columns}};
+        _ -> ok
+    end.
+
+%% @doc Ensure parser state is initialized.
+-spec ensure_parser_state(state()) -> state().
+ensure_parser_state(State) ->
+    case State#connection_state.parser_state of
+        undefined ->
+            PS = clickhouse_erl_parser:init(
+                State#connection_state.negotiated_version,
+                State#connection_state.compression_opts
+            ),
+            State#connection_state{parser_state = PS};
+        _ ->
+            State
+    end.
+
+%% @doc Set socket to passive mode and drain any pending TCP message.
+-spec set_passive_and_drain(state()) -> ok.
+set_passive_and_drain(State) ->
+    inet:setopts(State#connection_state.socket, [{active, false}]),
+    receive
+        {tcp, _, _} -> ok
+    after 0 -> ok
+    end.
+
+%% @doc Run the streaming loop and handle completion/error.
+-spec run_streaming_loop(state(), map()) ->
+    {ok, streaming_insert_result(), state()} | {error, term(), state()}.
+run_streaming_loop(State, PreparedRequest) ->
+    Columns = maps:get(columns, PreparedRequest, []),
+    OnInput = maps:get(on_input, PreparedRequest),
+    InitialAcc = maps:get(initial_accumulator, PreparedRequest, #{}),
+    Timeout = maps:get(timeout, PreparedRequest, 30000),
+    inet:setopts(State#connection_state.socket, [{active, false}]),
+    InitialStats = #{
+        rows_inserted => 0,
+        blocks_sent => 0,
+        start_time => erlang:system_time(millisecond),
+        timeout => Timeout
+    },
+    case streaming_loop(State, Columns, InitialAcc, OnInput, InitialStats) of
+        {ok, _FinalAcc, FinalStats} ->
+            finalize_streaming_insert(State, FinalStats);
+        {error, Reason} ->
+            %% Send best-effort blank block
+            _ = gen_tcp:send(
+                State#connection_state.socket,
+                encode_blank_data_block(State#connection_state.compression_opts)
+            ),
+            %% Drain server response to leave connection clean
+            _ = wait_for_end_of_stream(State),
+            TargetState =
+                case Reason of
+                    {network_error, _} -> error;
+                    _ -> ready
+                end,
+            {error, Reason, clear_active_query_state(State, TargetState)}
+    end.
+
+%% @doc Send final blank block and return result.
+-spec finalize_streaming_insert(state(), map()) ->
+    {ok, streaming_insert_result(), state()} | {error, term(), state()}.
+finalize_streaming_insert(State, FinalStats) ->
+    case
+        gen_tcp:send(
+            State#connection_state.socket,
+            encode_blank_data_block(State#connection_state.compression_opts)
+        )
+    of
+        ok ->
+            %% Wait for SERVER_END_OF_STREAM before returning
+            case wait_for_end_of_stream(State) of
+                ok ->
+                    {ok, build_streaming_result(FinalStats), clear_active_query_state(State)};
+                {error, Reason} ->
+                    {error, Reason, clear_active_query_state(State)}
+            end;
+        {error, Reason} ->
+            {error, {network_error, Reason}, clear_active_query_state(State, error)}
+    end.
+
+%% @doc Wait for SERVER_END_OF_STREAM after sending final blank block.
+%% Uses passive recv to consume the server's response.
+-spec wait_for_end_of_stream(state()) -> ok | {error, term()}.
+wait_for_end_of_stream(State) ->
+    Socket = State#connection_state.socket,
+    StateWithParser = ensure_parser_state(State),
+    wait_for_end_of_stream_loop(Socket, StateWithParser#connection_state.parser_state).
+
+wait_for_end_of_stream_loop(Socket, ParserState) ->
+    case gen_tcp:recv(Socket, 0, 5000) of
+        {ok, Data} ->
+            case clickhouse_erl_parser:parse(Data, ParserState) of
+                {ok, Events, NewParserState} ->
+                    case has_end_of_stream(Events) of
+                        true -> ok;
+                        false -> wait_for_end_of_stream_loop(Socket, NewParserState)
+                    end;
+                {error, _Reason} ->
+                    ok
+            end;
+        {error, timeout} ->
+            ok;
+        {error, Reason} ->
+            {error, {network_error, Reason}}
+    end.
+
+has_end_of_stream([]) -> false;
+has_end_of_stream([{'end', server_end_of_stream} | _]) -> true;
+has_end_of_stream([{start, server_end_of_stream} | _]) -> true;
+has_end_of_stream([_ | Rest]) -> has_end_of_stream(Rest).
+
+%% @doc Create push session state for start_streaming_insert.
+-spec create_push_session(state(), map()) -> {ok, reference(), state()}.
+create_push_session(State, PreparedRequest) ->
+    StreamRef = make_ref(),
+    Columns = maps:get(columns, PreparedRequest, []),
+    Timeout = maps:get(timeout, PreparedRequest, 30000),
+    SessionState = #{
+        streaming_mode => push,
+        stream_ref => StreamRef,
+        expected_columns => Columns,
+        rows_inserted => 0,
+        blocks_sent => 0,
+        session_failed => false,
+        start_time => erlang:system_time(millisecond)
+    },
+    TimerRef =
+        case Timeout =/= infinity of
+            true -> erlang:send_after(Timeout, self(), {streaming_timeout, StreamRef});
+            false -> undefined
+        end,
+    ActiveState = State#connection_state.active_query_state,
+    NewActiveState = ActiveState#{
+        push_session => SessionState, timeout_timer => TimerRef
+    },
+    {ok, StreamRef, State#connection_state{active_query_state = NewActiveState}}.
+
+%% @doc Send query packet and blank block for streaming insert.
+%% Returns {ok, NewState} with active_query_state set, or {error, Reason}.
+-spec send_query_and_blank_block(State, PreparedRequest) -> {ok, NewState} | {error, Reason} when
+    State :: state(),
+    PreparedRequest :: map(),
+    NewState :: state(),
+    Reason :: connection_error().
+send_query_and_blank_block(State, PreparedRequest) ->
+    Socket = State#connection_state.socket,
+    NegotiatedVersion = State#connection_state.negotiated_version,
+    QueryId = maps:get(query_id, PreparedRequest),
+    Timeout = maps:get(timeout, PreparedRequest, 30000),
+
+    %% Build QueryInfo - reuse existing pattern (same as execute_query/execute_insert)
+    CompressionMode = get_compression_mode(State#connection_state.compression_opts),
+    QueryInfo = #{
+        query_id => QueryId,
+        client_info => create_client_info(NegotiatedVersion, QueryId),
+        settings => maps:get(settings, PreparedRequest, []),
+        query_body => maps:get(sql, PreparedRequest),
+        parameters => maps:get(parameters, PreparedRequest, []),
+        compression => CompressionMode
+    },
+
+    maybe
+        %% Step 1: Encode query packet
+        {ok, QueryPacket} ?=
+            clickhouse_erl_protocol_query_packet:encode(QueryInfo, NegotiatedVersion),
+        %% Step 2: Set socket to active mode BEFORE sending any packets
+        ok ?= inet:setopts(Socket, [{active, once}]),
+        %% Step 3: Send query packet + blank block
+        BlankBlock = encode_blank_data_block(State#connection_state.compression_opts),
+        ok ?= gen_tcp:send(Socket, [QueryPacket, BlankBlock]),
+        %% Step 4: Start timeout timer
+        TimerRef = create_timeout_timer(Timeout, QueryId),
+        %% Step 5: Update connection state
+        ActiveQueryState = #{
+            caller => {self(), undefined},
+            query_id => QueryId,
+            timeout => Timeout,
+            timer_ref => TimerRef,
+            cancelled => false,
+            replied => false,
+            is_insert => true,
+            on_data => fun default_on_data_callback/2,
+            accumulator => #{}
+        },
+        NewState = State#connection_state{active_query_state = ActiveQueryState},
+        {ok, NewState}
+    else
+        {error, Reason} when is_tuple(Reason) ->
+            %% Classify error based on context
+            case Reason of
+                {protocol_error, _} -> {error, Reason};
+                {send_failed, _} -> {error, Reason};
+                _ -> {error, {protocol_error, Reason}}
+            end;
+        {error, Reason} ->
+            {error, {network_error, Reason}}
+    end.
+
+%% @doc Build streaming insert result map.
+-spec build_streaming_result(SessionState) -> Result when
+    SessionState :: #{rows_inserted := non_neg_integer(), blocks_sent := non_neg_integer()},
+    Result :: #{
+        rows_inserted := non_neg_integer(),
+        blocks_sent := non_neg_integer(),
+        elapsed_time := non_neg_integer()
+    }.
+build_streaming_result(SessionState) ->
+    clickhouse_erl_streaming_helpers:build_streaming_result(SessionState).
+
+%% @doc Clear active query state for streaming insert.
+%% Sets connection state to ready after clearing active query.
+-spec clear_active_query_state(State) -> NewState when
+    State :: state(),
+    NewState :: state().
+clear_active_query_state(State) ->
+    clear_active_query_state(State, ready).
+
+%% @doc Clear active query state for streaming insert with explicit target state.
+%% Use `ready` for normal completion or recoverable errors (callback, validation, server exception
+%% when TCP remains open). Use `error` for network errors where the TCP connection is broken.
+-spec clear_active_query_state(State, TargetState) -> NewState when
+    State :: state(),
+    TargetState :: ready | error,
+    NewState :: state().
+clear_active_query_state(State, TargetState) ->
+    %% Cancel timeout timer if it exists
+    case State#connection_state.active_query_state of
+        #{timeout_timer := TimerRef} when TimerRef =/= undefined ->
+            erlang:cancel_timer(TimerRef);
+        _ ->
+            ok
+    end,
+    State#connection_state{
+        state = TargetState,
+        active_query_state = undefined,
+        parser_state = undefined
+    }.
+
 %% @doc Cancel a timer if it is set.
 -spec maybe_cancel_timer(reference() | undefined) -> ok.
 maybe_cancel_timer(undefined) ->
@@ -2636,6 +3172,133 @@ maybe_cancel_timer(undefined) ->
 maybe_cancel_timer(TimerRef) ->
     erlang:cancel_timer(TimerRef),
     ok.
+
+%%%===================================================================
+%%% Push-based streaming insert helpers
+%%%===================================================================
+
+%% @doc Extract push session from connection state.
+%% Returns {ok, ActiveState, SessionState} or {error, Reason}.
+-spec get_push_session(state()) ->
+    {ok, map(), map()} | {error, term()}.
+get_push_session(#connection_state{active_query_state = undefined}) ->
+    {error, {validation_error, no_active_streaming_session}};
+get_push_session(#connection_state{active_query_state = ActiveState}) ->
+    case maps:get(push_session, ActiveState, undefined) of
+        undefined ->
+            {error, {validation_error, no_active_streaming_session}};
+        SessionState ->
+            {ok, ActiveState, SessionState}
+    end.
+
+%% @doc Check push session is valid for send_data: not failed, ref matches.
+-spec check_push_session_valid(map(), reference()) -> ok | {error, term()}.
+check_push_session_valid(SessionState, StreamRef) ->
+    case maps:get(session_failed, SessionState, false) of
+        {true, FailReason} ->
+            {error, FailReason};
+        false ->
+            case maps:get(stream_ref, SessionState) of
+                StreamRef -> ok;
+                _ -> {error, {validation_error, invalid_stream_ref}}
+            end
+    end.
+
+%% @doc Handle send_data after session validation passes.
+%% Validates column data, encodes, sends, checks server response.
+-spec handle_send_data(state(), map(), map(), [map()]) ->
+    {reply, ok | {error, term()}, state()}.
+handle_send_data(State, ActiveState, SessionState, ColumnData) ->
+    ExpectedColumns = maps:get(expected_columns, SessionState),
+    case validate_streaming_block(ColumnData, ExpectedColumns) of
+        ok ->
+            case has_rows(ColumnData) of
+                false ->
+                    %% Skip empty blocks — session stays active
+                    {reply, ok, State};
+                true ->
+                    %% Merge types from column definitions into data
+                    TypedData = merge_column_types(ColumnData, ExpectedColumns),
+                    send_and_check(State, ActiveState, SessionState, TypedData)
+            end;
+        {error, Reason} ->
+            %% Validation errors do NOT fail the session — caller can fix data and retry
+            {reply, {error, Reason}, State}
+    end.
+
+%% @doc Encode, send a data block, then check for server exceptions.
+-spec send_and_check(state(), map(), map(), [map()]) ->
+    {reply, ok | {error, term()}, state()}.
+send_and_check(State, ActiveState, SessionState, ColumnData) ->
+    case encode_and_send_block(State, ColumnData) of
+        ok ->
+            case
+                check_server_response(
+                    State#connection_state.socket,
+                    State#connection_state.parser_state
+                )
+            of
+                {ok, NewParserState} ->
+                    NumRows =
+                        case ColumnData of
+                            [] -> 0;
+                            [#{data := Data} | _] -> length(Data)
+                        end,
+                    NewSession = SessionState#{
+                        rows_inserted => maps:get(rows_inserted, SessionState) + NumRows,
+                        blocks_sent => maps:get(blocks_sent, SessionState) + 1
+                    },
+                    {reply, ok, State#connection_state{
+                        parser_state = NewParserState,
+                        active_query_state = ActiveState#{push_session => NewSession}
+                    }};
+                {exception, ExceptionInfo, NewParserState} ->
+                    NewSession = SessionState#{
+                        session_failed => {true, {server_exception, ExceptionInfo}}
+                    },
+                    {reply, {error, {server_exception, ExceptionInfo}}, State#connection_state{
+                        parser_state = NewParserState,
+                        active_query_state = ActiveState#{push_session => NewSession}
+                    }};
+                {error, Reason} ->
+                    NewSession = SessionState#{
+                        session_failed => {true, {network_error, Reason}}
+                    },
+                    {reply, {error, {network_error, Reason}}, State#connection_state{
+                        active_query_state = ActiveState#{push_session => NewSession}
+                    }}
+            end;
+        {error, Reason} ->
+            NewSession = SessionState#{
+                session_failed => {true, {network_error, Reason}}
+            },
+            {reply, {error, {network_error, Reason}}, State#connection_state{
+                active_query_state = ActiveState#{push_session => NewSession}
+            }}
+    end.
+
+%% @doc Handle finish_streaming_insert after validation passes.
+-spec handle_finish_streaming(state(), map()) ->
+    {reply, {ok, map()} | {error, term()}, state()}.
+handle_finish_streaming(State, SessionState) ->
+    case
+        gen_tcp:send(
+            State#connection_state.socket,
+            encode_blank_data_block(State#connection_state.compression_opts)
+        )
+    of
+        ok ->
+            %% Wait for SERVER_END_OF_STREAM before returning
+            case wait_for_end_of_stream(State) of
+                ok ->
+                    {reply, {ok, build_streaming_result(SessionState)},
+                        clear_active_query_state(State)};
+                {error, Reason} ->
+                    {reply, {error, Reason}, clear_active_query_state(State)}
+            end;
+        {error, Reason} ->
+            {reply, {error, {network_error, Reason}}, clear_active_query_state(State, error)}
+    end.
 
 %% @doc Handle the result of process_events after successful parsing.
 %% Checks for exceptions, end_of_stream, or continues waiting.
@@ -2761,11 +3424,16 @@ invoke_optional_callback(Callback, Info) ->
 
 %% @doc Check if connection is ready for operations
 %% Returns ok if ready, {error, Reason} otherwise
+%% Rejects if active_query_state is set (connection busy with another query)
 -spec check_connection_ready(State) -> ok | {error, Reason} when
     State :: state(),
     Reason :: connection_error().
-check_connection_ready(#connection_state{state = ready}) ->
+check_connection_ready(#connection_state{state = ready, active_query_state = undefined}) ->
     ok;
+check_connection_ready(#connection_state{state = ready, active_query_state = ActiveQueryState}) when
+    ActiveQueryState =/= undefined
+->
+    {error, {connection_error, query_in_progress}};
 check_connection_ready(#connection_state{state = error, error_reason = ErrorReason}) ->
     {error, ErrorReason};
 check_connection_ready(#connection_state{state = connecting}) ->
@@ -3166,6 +3834,190 @@ invoke_streaming_callback(Callback, Value, EosAcc, NmAcc, ExAcc, Acc) ->
         error:Err:Stack ->
             {callback_error, {callback_crashed, {error, Err, Stack}}}
     end.
+
+%% @doc Safely invoke the on_input callback for pull-based streaming insert.
+%% Wraps callback invocation in try...catch to handle crashes and validates
+%% return values against expected patterns.
+%%
+%% Requirements: 2.1, 2.4, 5.4, 5.5
+%% Returns:
+%%   {ok, UpdatedColumns, NewAcc} - Continue with next block
+%%   {done, NewAcc} - Finish streaming
+%%   {error, Reason} - Abort with error
+%%   {error, {callback_crashed, {Class, Reason, Stacktrace}}} - Callback crashed
+%%   {error, {invalid_callback_return, ReturnValue}} - Invalid return term
+-spec safe_invoke_on_input(Callback :: function(), Columns :: [map()], Acc :: term()) ->
+    {ok, [map()], term()} | {done, term()} | {error, term()}.
+safe_invoke_on_input(Callback, Columns, Acc) ->
+    clickhouse_erl_streaming_helpers:safe_invoke_on_input(Callback, Columns, Acc).
+
+%% @doc Tail-recursive streaming loop for pull-based streaming insert.
+%% Invokes on_input callback, validates block, encodes+send, recurses.
+%% Skips empty blocks without incrementing block count.
+%%
+%% Requirements: 2.1, 2.2, 2.3, 3.3, 3.4, 4.1, 4.2, 4.3
+%% Returns: {ok, FinalAcc, Stats} | {error, Reason}
+-spec streaming_loop(State, Columns, Acc, OnInput, Stats) ->
+    {ok, term(), #{rows_inserted := non_neg_integer(), blocks_sent := non_neg_integer()}}
+    | {error, term()}
+when
+    State :: state(),
+    Columns :: [map()],
+    Acc :: term(),
+    OnInput :: function(),
+    Stats :: #{
+        rows_inserted := non_neg_integer(),
+        blocks_sent := non_neg_integer(),
+        start_time := integer(),
+        timeout := timeout()
+    }.
+streaming_loop(State, Columns, Acc, OnInput, Stats) ->
+    %% NOTE: Pull-based cancellation via cancel_query/1,2 is not possible during the
+    %% synchronous streaming loop because the gen_server is blocked. The only way to
+    %% abort a running pull-based streaming loop is via timeout (check_timeout/2 below).
+    %% Push-based cancellation works because each send_data is a separate gen_server:call.
+    StartTime = maps:get(start_time, Stats),
+    Timeout = maps:get(timeout, Stats),
+    case check_timeout(StartTime, Timeout) of
+        {error, Reason} ->
+            {error, Reason};
+        ok ->
+            case safe_invoke_on_input(OnInput, Columns, Acc) of
+                {done, FinalAcc} ->
+                    {ok, FinalAcc, Stats};
+                {error, Reason} ->
+                    {error, {callback_error, Reason}};
+                {ok, UpdatedColumns, NewAcc} ->
+                    case process_streaming_block(State, UpdatedColumns, Columns) of
+                        skip ->
+                            streaming_loop(State, Columns, NewAcc, OnInput, Stats);
+                        {ok, NewState} ->
+                            NewStats = increment_stats(Stats, UpdatedColumns),
+                            streaming_loop(NewState, Columns, NewAcc, OnInput, NewStats);
+                        {error, Reason} ->
+                            {error, Reason}
+                    end
+            end
+    end.
+
+%% @doc Process a single streaming block: validate, encode, send, check server response.
+-spec process_streaming_block(state(), [map()], [map()]) ->
+    skip | {ok, state()} | {error, term()}.
+process_streaming_block(State, UpdatedColumns, OriginalColumns) ->
+    maybe
+        ok ?= validate_streaming_block(UpdatedColumns, OriginalColumns),
+        case has_rows(UpdatedColumns) of
+            false ->
+                skip;
+            true ->
+                %% Merge types from column definitions into data
+                TypedColumns = merge_column_types(UpdatedColumns, OriginalColumns),
+                maybe
+                    ok ?= encode_and_send_block(State, TypedColumns),
+                    case
+                        check_server_response(
+                            State#connection_state.socket,
+                            State#connection_state.parser_state
+                        )
+                    of
+                        {ok, NewParserState} ->
+                            {ok, State#connection_state{parser_state = NewParserState}};
+                        {exception, ExceptionInfo, _} ->
+                            {error, {server_exception, ExceptionInfo}};
+                        {error, Reason} ->
+                            {error, Reason}
+                    end
+                end
+        end
+    end.
+
+%% @doc Check remaining time for streaming insert.
+%% Returns ok if within timeout, {error, {timeout_error, streaming_insert}} if exceeded.
+-spec check_timeout(non_neg_integer(), timeout()) ->
+    ok | {error, {timeout_error, streaming_insert}}.
+check_timeout(_StartTime, infinity) ->
+    ok;
+check_timeout(StartTime, Timeout) ->
+    clickhouse_erl_streaming_helpers:check_timeout(StartTime, Timeout).
+
+%% @doc Non-blocking check for server exceptions during streaming.
+%% Uses selective receive with timeout 0 to check for incoming TCP data.
+%% Returns {ok, ParserState} if no data, {exception, ExceptionInfo, ParserState} if exception,
+%% {error, Reason} if parsing error.
+-spec check_server_response(gen_tcp:socket(), map()) ->
+    {ok, map()} | {exception, map(), map()} | {error, term()}.
+check_server_response(Socket, ParserState) ->
+    %% Use passive recv with timeout 0 for non-blocking check.
+    %% This avoids leaving the socket in {active, once} mode which would
+    %% cause TCP data to arrive as handle_info messages during the streaming loop.
+    case gen_tcp:recv(Socket, 0, 0) of
+        {ok, Data} ->
+            case clickhouse_erl_parser:parse(Data, ParserState) of
+                {ok, Events, NewParserState} ->
+                    case has_exception(Events) of
+                        {true, ExceptionInfo} ->
+                            {exception, ExceptionInfo, NewParserState};
+                        false ->
+                            {ok, NewParserState}
+                    end;
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, timeout} ->
+            %% No data available - normal case during streaming
+            {ok, ParserState};
+        {error, _Reason} ->
+            %% Socket error - return current state, will be caught on next send
+            {ok, ParserState}
+    end.
+
+%% @doc Check if events contain a server exception.
+%% Returns {true, ExceptionInfo} if found, false otherwise.
+-spec has_exception(list()) -> {true, map()} | false.
+has_exception(Events) when is_list(Events) ->
+    has_exception_loop(Events).
+
+has_exception_loop([]) ->
+    false;
+has_exception_loop([{start, server_exception} | Rest]) ->
+    %% Collect exception info from subsequent events
+    {true, collect_exception_info_for_streaming(Rest, #{})};
+has_exception_loop([_ | Rest]) ->
+    has_exception_loop(Rest).
+
+%% @doc Collect exception info from events for streaming insert.
+-spec collect_exception_info_for_streaming(list(), map()) -> map().
+collect_exception_info_for_streaming([], Acc) ->
+    Acc;
+collect_exception_info_for_streaming([{'end', server_exception} | _], Acc) ->
+    Acc;
+collect_exception_info_for_streaming([{data, field, Value} | Rest], Acc) ->
+    collect_exception_info_for_streaming(Rest, Acc#{field => Value});
+collect_exception_info_for_streaming([{data, message, Value} | Rest], Acc) ->
+    collect_exception_info_for_streaming(Rest, Acc#{message => Value});
+collect_exception_info_for_streaming([{data, code, Value} | Rest], Acc) ->
+    collect_exception_info_for_streaming(Rest, Acc#{code => Value});
+collect_exception_info_for_streaming([_ | Rest], Acc) ->
+    collect_exception_info_for_streaming(Rest, Acc).
+
+%% @doc Increment stats for a data block.
+%% Adds rows to rows_inserted and 1 to blocks_sent.
+-spec increment_stats(Stats, ColumnData) -> NewStats when
+    Stats :: #{
+        rows_inserted := non_neg_integer(),
+        blocks_sent := non_neg_integer(),
+        start_time := integer(),
+        timeout := timeout()
+    },
+    ColumnData :: [map()],
+    NewStats :: #{
+        rows_inserted := non_neg_integer(),
+        blocks_sent := non_neg_integer(),
+        start_time := integer(),
+        timeout := timeout()
+    }.
+increment_stats(Stats, ColumnData) ->
+    clickhouse_erl_streaming_helpers:increment_stats(Stats, ColumnData).
 
 %% @doc Initialize accumulator state for event processing.
 %% Always populates `on_data_callback' and `user_acc' fields.

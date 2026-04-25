@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Streaming insert support with two patterns:
+  - Pull-based (`streaming_insert/3,4`) — engine calls `on_input` callback repeatedly
+  - Push-based (`start_streaming_insert/3,4` + `send_data/3` + `finish_streaming_insert/2`) — caller pushes blocks explicitly
+- Per-block compression support for streaming inserts (LZ4, ZSTD, disabled)
+- Timeout and cancellation support for both streaming insert modes
+- Connection state recovery after streaming insert success or failure
+- Detailed documentation in `doc/streaming-insert.md`
+
 ## [0.3.0](https://github.com/couchemar/clickhouse_erl/releases/tag/v0.3.0) - 2026-04-12
 
 ### Changed
