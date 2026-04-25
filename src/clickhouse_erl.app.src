@@ -1,6 +1,6 @@
 {application, clickhouse_erl, [
     {description, "ClickHouse client"},
-    {vsn, "0.3.0"},
+    {vsn, "0.4.0"},
     {registered, [clickhouse_erl_sup, clickhouse_erl_connection_sup]},
     {mod, {clickhouse_erl_app, []}},
     {applications, [
