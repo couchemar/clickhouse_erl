@@ -2,6 +2,7 @@
 -include_lib("common_test/include/ct.hrl").
 
 -export([all/0, suite/0, init_per_suite/1, end_per_suite/1]).
+-export([init_per_testcase/2, end_per_testcase/2]).
 -export([
     optional_callbacks_integration/1,
     optional_callback_error_nonfatal/1,
@@ -26,11 +27,18 @@ end_per_suite(_Config) ->
     test_helpers:cleanup(),
     ok.
 
+init_per_testcase(_TestCase, Config) ->
+    {ok, Conn} = test_helpers:connect(),
+    [{connection, Conn} | Config].
+
+end_per_testcase(_TestCase, Config) ->
+    Conn = ?config(connection, Config),
+    clickhouse_erl_connection:disconnect(Conn),
+    ok.
+
 %% Test: optional callbacks are invoked during query execution
 optional_callbacks_integration(Config) ->
-    {ok, _Apps} = application:ensure_all_started(clickhouse_erl),
-    {ok, Conn} = test_helpers:connect(),
-
+    Conn = ?config(connection, Config),
     TestPid = self(),
 
     PreparedRequest = #{
@@ -51,14 +59,11 @@ optional_callbacks_integration(Config) ->
     },
 
     {ok, _Result} = clickhouse_erl_connection:query(Conn, PreparedRequest),
-
-    clickhouse_erl_connection:disconnect(Conn),
     ok.
 
 %% Test: optional callback errors are non-fatal
 optional_callback_error_nonfatal(Config) ->
-    {ok, _Apps} = application:ensure_all_started(clickhouse_erl),
-    {ok, Conn} = test_helpers:connect(),
+    Conn = ?config(connection, Config),
 
     PreparedRequest = #{
         sql => <<"SELECT number FROM system.numbers LIMIT 100">>,
@@ -68,16 +73,12 @@ optional_callback_error_nonfatal(Config) ->
         end
     },
 
-    Result = clickhouse_erl_connection:query(Conn, PreparedRequest),
-    {ok, _} = Result,
-
-    clickhouse_erl_connection:disconnect(Conn),
+    {ok, _} = clickhouse_erl_connection:query(Conn, PreparedRequest),
     ok.
 
 %% Test: optional callback crash is non-fatal
 optional_callback_crash_nonfatal(Config) ->
-    {ok, _Apps} = application:ensure_all_started(clickhouse_erl),
-    {ok, Conn} = test_helpers:connect(),
+    Conn = ?config(connection, Config),
 
     PreparedRequest = #{
         sql => <<"SELECT number FROM system.numbers LIMIT 100">>,
@@ -87,8 +88,5 @@ optional_callback_crash_nonfatal(Config) ->
         end
     },
 
-    Result = clickhouse_erl_connection:query(Conn, PreparedRequest),
-    {ok, _} = Result,
-
-    clickhouse_erl_connection:disconnect(Conn),
+    {ok, _} = clickhouse_erl_connection:query(Conn, PreparedRequest),
     ok.

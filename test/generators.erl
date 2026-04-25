@@ -26,7 +26,12 @@
     date_gen/0,
     datetime_gen/0,
     % Composite generators
-    map_gen/2
+    map_gen/2,
+    % Streaming insert generators
+    column_defs_gen/0,
+    column_data_gen/1,
+    streaming_callback_sequence_gen/0,
+    invalid_callback_return_gen/0
 ]).
 
 %%%===================================================================
@@ -146,3 +151,103 @@ datetime_gen() ->
     ?LET(
         Seconds, range(0, 4294967295), calendar:gregorian_seconds_to_datetime(Seconds + 62167219200)
     ).
+
+%%%===================================================================
+%%% Streaming Insert Generators
+%%%===================================================================
+
+%% @doc Generator for column definitions with empty data lists.
+%% Produces 1-5 columns with UInt32 or String types.
+-spec column_defs_gen() -> proper_types:type().
+column_defs_gen() ->
+    ?LET(
+        {N, Types},
+        ?LET(
+            Count,
+            range(1, 5),
+            {Count, vector(Count, oneof([<<"UInt32">>, <<"String">>]))}
+        ),
+        [
+            #{
+                name => list_to_binary("col_" ++ integer_to_list(I)),
+                type => lists:nth(I, Types),
+                data => []
+            }
+         || I <- lists:seq(1, N)
+        ]
+    ).
+
+%% @doc Generator for column data matching given definitions with random row counts (1-50).
+%% For UInt32 type, generates uint32 values. For String type, generates binary strings.
+-spec column_data_gen([map()]) -> proper_types:type().
+column_data_gen(ColumnDefs) ->
+    ?LET(
+        RowCount,
+        range(1, 50),
+        ?LET(
+            Columns,
+            proper_types:fixed_list(
+                [column_values_gen(Col, RowCount) || Col <- ColumnDefs]
+            ),
+            Columns
+        )
+    ).
+
+%% @doc Generator for a sequence of callback return values:
+%% a sequence of {ok, Data, Acc} tuples followed by exactly one {done, Acc} or {error, Reason}.
+-spec streaming_callback_sequence_gen() -> proper_types:type().
+streaming_callback_sequence_gen() ->
+    ?LET(
+        {OkCount, Terminator},
+        {range(0, 5), oneof([done, error])},
+        begin
+            OkEntries = [{ok, placeholder_data, I} || I <- lists:seq(1, OkCount)],
+            Final =
+                case Terminator of
+                    done -> [{done, OkCount + 1}];
+                    error -> [{error, {test_error, OkCount + 1}}]
+                end,
+            OkEntries ++ Final
+        end
+    ).
+
+%% @doc Generator for terms that are NOT valid callback returns.
+%% Valid returns are {ok, _, _}, {done, _}, or {error, _}.
+-spec invalid_callback_return_gen() -> proper_types:type().
+invalid_callback_return_gen() ->
+    oneof([
+        %% Atoms
+        oneof([ok, done, error, undefined, true, false]),
+        %% Plain integers
+        integer(),
+        %% Binaries
+        binary(),
+        %% Wrong-arity tuples
+        ?LET(X, integer(), {ok, X}),
+        ?LET(X, integer(), {done, X, X}),
+        %% Tuples with wrong tag
+        ?LET({X, Y}, {integer(), integer()}, {wrong, X, Y}),
+        ?LET(X, integer(), {data, X}),
+        %% Lists
+        list(integer())
+    ]).
+
+%%%===================================================================
+%%% Internal Helpers (Streaming Insert)
+%%%===================================================================
+
+%% @doc Generate a single column map with resolved values for the given row count.
+-spec column_values_gen(map(), pos_integer()) -> proper_types:type().
+column_values_gen(#{name := Name, type := Type}, RowCount) ->
+    ?LET(
+        Values,
+        vector(RowCount, data_for_type(Type)),
+        #{name => Name, type => Type, data => Values}
+    ).
+
+%% @doc Return a PropEr generator for a single value of the given ClickHouse type.
+-spec data_for_type(binary()) -> proper_types:type().
+data_for_type(<<"UInt32">>) ->
+    uint32_gen();
+data_for_type(<<"String">>) ->
+    non_empty_binary_string_gen().

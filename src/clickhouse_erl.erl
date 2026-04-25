@@ -51,6 +51,38 @@
 %%
 %% % Disconnect
 %% ok = clickhouse_erl:disconnect(Connection).
+%%
+%% % --- Streaming Insert (Pull-Based) ---
+%% % Send data in multiple blocks via a callback
+%% Columns = [
+%%     #{name => <<"id">>, type => <<"UInt32">>},
+%%     #{name => <<"name">>, type => <<"String">>}
+%% ],
+%% Callback = fun(Acc) ->
+%%     case Acc of
+%%         0 ->
+%%             {ok, [
+%%                 #{name => <<"id">>, data => [1, 2]},
+%%                 #{name => <<"name">>, data => [<<"a">>, <<"b">>]}
+%%             ], 1};
+%%         _ ->
+%%             {done, Acc}
+%%     end
+%% end,
+%% {ok, Result} = clickhouse_erl:streaming_insert(Connection,
+%%     <<"INSERT INTO my_table (id, name) VALUES">>,
+%%     #{on_input => Callback, columns => Columns, initial_accumulator => 0}).
+%%
+%% % --- Streaming Insert (Push-Based) ---
+%% % Explicitly push data blocks at your own pace
+%% {ok, StreamRef} = clickhouse_erl:start_streaming_insert(Connection,
+%%     <<"INSERT INTO my_table (id, name) VALUES">>,
+%%     #{columns => Columns}),
+%% ok = clickhouse_erl:send_data(Connection, StreamRef, [
+%%     #{name => <<"id">>, data => [1, 2]},
+%%     #{name => <<"name">>, data => [<<"a">>, <<"b">>]}
+%% ]),
+%% {ok, Result} = clickhouse_erl:finish_streaming_insert(Connection, StreamRef).
 %% '''
 %% @end
 %%%-------------------------------------------------------------------
@@ -72,7 +104,13 @@
     insert/3,
     insert/4,
     cancel_query/1,
-    cancel_query/2
+    cancel_query/2,
+    streaming_insert/3,
+    streaming_insert/4,
+    start_streaming_insert/3,
+    start_streaming_insert/4,
+    send_data/3,
+    finish_streaming_insert/2
 ]).
 
 %% Application management
@@ -94,6 +132,12 @@
     insert/4,
     cancel_query/1,
     cancel_query/2,
+    streaming_insert/3,
+    streaming_insert/4,
+    start_streaming_insert/3,
+    start_streaming_insert/4,
+    send_data/3,
+    finish_streaming_insert/2,
     start/0,
     stop/0
 ]).
@@ -103,7 +147,9 @@
     connection_options/0,
     connection_info/0,
     connection_error/0,
-    query_options/0
+    query_options/0,
+    streaming_insert_result/0,
+    column_def/0
 ]).
 
 %% Import types from connection module
@@ -118,6 +164,16 @@
     settings => settings_input(),
     parameters => [{binary(), binary()}]
 }.
+
+%% Streaming insert result type
+-type streaming_insert_result() :: #{
+    rows_inserted := non_neg_integer(),
+    blocks_sent := non_neg_integer(),
+    elapsed_time := non_neg_integer()
+}.
+
+%% Column definition type (schema only, no data)
+-type column_def() :: #{name := binary(), type := binary()}.
 
 %%%===================================================================
 %%% Public API
@@ -414,6 +470,125 @@ insert(Connection, SQL, Input, Options) ->
         options => Options
     }),
     clickhouse_erl_app:insert(Connection, SQL, Input, Options).
+
+%% @doc Execute a streaming INSERT query using pull-based pattern.
+%%
+%% This function starts a streaming insert operation where data is provided
+%% via an `on_input` callback function. The callback is invoked repeatedly
+%% to provide data blocks until it returns `{done, Acc}` or `{error, Reason}`.
+%%
+%% The `on_input` callback receives the current accumulator and must return
+%% one of:
+%% - `{ok, ColumnData, NewAcc}' - Provide a data block and continue
+%% - `{done, NewAcc}' - Finish the streaming insert
+%% - `{error, Reason}' - Abort with an error
+%%
+%% @param Connection The connection pid.
+%% @param SQL The INSERT statement.
+%% @param Options Options map containing `on_input' callback and optional `initial_accumulator'.
+%% @returns {ok, Result} with `rows_inserted', `blocks_sent', and `elapsed_time'.
+-spec streaming_insert(Connection, SQL, Options) -> {ok, Result} | {error, Reason} when
+    Connection :: pid(),
+    SQL :: string() | binary(),
+    Options :: #{on_input := fun(), columns := [column_def()], initial_accumulator => term()},
+    Result :: streaming_insert_result(),
+    Reason :: connection_error().
+streaming_insert(Connection, SQL, Options) ->
+    streaming_insert(Connection, SQL, Options, #{}).
+
+%% @doc Execute a streaming INSERT query using pull-based pattern with additional options.
+%%
+%% @param Connection The connection pid.
+%% @param SQL The INSERT statement.
+%% @param Options Options map containing `on_input' callback and optional `initial_accumulator'.
+%% @param ExtraOptions Additional options map.
+%% @returns {ok, Result} or {error, Reason}.
+-spec streaming_insert(Connection, SQL, Options, ExtraOptions) ->
+    {ok, Result} | {error, Reason}
+when
+    Connection :: pid(),
+    SQL :: string() | binary(),
+    Options :: #{on_input := fun(), columns := [column_def()], initial_accumulator => term()},
+    ExtraOptions :: map(),
+    Result :: streaming_insert_result(),
+    Reason :: connection_error().
+streaming_insert(Connection, SQL, Options, ExtraOptions) ->
+    ?LOG_DEBUG("API call: streaming_insert/4", #{
+        connection => Connection,
+        sql => SQL,
+        options => Options
+    }),
+    clickhouse_erl_app:streaming_insert(Connection, SQL, Options, ExtraOptions).
+
+%% @doc Start a push-based streaming insert session.
+%%
+%% This function starts a streaming insert session where data blocks are
+%% sent via separate `send_data/3` calls. Returns a stream reference that
+%% is used for subsequent `send_data/3` and `finish_streaming_insert/2` calls.
+%%
+%% @param Connection The connection pid.
+%% @param SQL The INSERT statement.
+%% @param Options Options map containing `columns' (list of column definitions).
+%% @returns {ok, StreamRef} where StreamRef is used for send_data/3 and finish_streaming_insert/2.
+-spec start_streaming_insert(Connection, SQL, Options) -> {ok, StreamRef} | {error, Reason} when
+    Connection :: pid(),
+    SQL :: string() | binary(),
+    Options :: #{columns := [column_def()]},
+    StreamRef :: term(),
+    Reason :: connection_error().
+start_streaming_insert(Connection, SQL, Options) ->
+    start_streaming_insert(Connection, SQL, Options, #{}).
+
+%% @doc Start a push-based streaming insert session with additional options.
+%%
+%% @param Connection The connection pid.
+%% @param SQL The INSERT statement.
+%% @param Options Options map containing `columns' (list of column definitions).
+%% @param ExtraOptions Additional options map.
+%% @returns {ok, StreamRef} or {error, Reason}.
+-spec start_streaming_insert(Connection, SQL, Options, ExtraOptions) ->
+    {ok, StreamRef} | {error, Reason}
+when
+    Connection :: pid(),
+    SQL :: string() | binary(),
+    Options :: #{columns := [column_def()]},
+    ExtraOptions :: map(),
+    StreamRef :: term(),
+    Reason :: connection_error().
+start_streaming_insert(Connection, SQL, Options, ExtraOptions) ->
+    ?LOG_DEBUG("API call: start_streaming_insert/4", #{
+        connection => Connection,
+        sql => SQL,
+        options => Options
+    }),
+    clickhouse_erl_app:start_streaming_insert(Connection, SQL, Options, ExtraOptions).
+
+%% @doc Send a data block during a push-based streaming insert session.
+%%
+%% @param Connection The connection pid.
+%% @param StreamRef The stream reference returned by start_streaming_insert/3,4.
+%% @param ColumnData List of column data maps to send.
+%% @returns ok or {error, Reason}.
+-spec send_data(Connection, StreamRef, ColumnData) -> ok | {error, Reason} when
+    Connection :: pid(),
+    StreamRef :: term(),
+    ColumnData :: [map()],
+    Reason :: connection_error() | validation_error | streaming_error.
+send_data(Connection, StreamRef, ColumnData) ->
+    clickhouse_erl_app:send_data(Connection, StreamRef, ColumnData).
+
+%% @doc Finish a push-based streaming insert session.
+%%
+%% @param Connection The connection pid.
+%% @param StreamRef The stream reference returned by start_streaming_insert/3,4.
+%% @returns {ok, Result} with `rows_inserted', `blocks_sent', and `elapsed_time'.
+-spec finish_streaming_insert(Connection, StreamRef) -> {ok, Result} | {error, Reason} when
+    Connection :: pid(),
+    StreamRef :: term(),
+    Result :: streaming_insert_result(),
+    Reason :: connection_error() | streaming_error.
+finish_streaming_insert(Connection, StreamRef) ->
+    clickhouse_erl_app:finish_streaming_insert(Connection, StreamRef).
 
 %% @doc Format library errors for human-readable display.
 %%
