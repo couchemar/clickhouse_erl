@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `block_end` event in streaming callbacks — dispatched after all column values for a non-empty block have been delivered, enabling bounded-memory row transposition and batch-aligned processing
+- `type_to_binary/1` shared function in `clickhouse_erl_types_composite` — single source of truth for type atom → binary string conversion (deduplicates from 5 modules)
+- `column_def()` type — schema-only column definitions without `data` key for streaming insert APIs
+- `column_type()` typedef expanded with `bool`, `int128`, `uint128`, `int256`, `uint256`, `nothing`
+- Bool type support in composite types (Nullable(Bool), Tuple(Int64, Bool), Array(Bool), etc.)
+- Streaming queries documentation in `doc/streaming-queries.md`
+- Property test for type serialization round-trip (`prop_type_to_binary_roundtrip`)
+
+### Changed
+- Streaming insert callbacks use arity-1 (`fun(Acc)`) — engine merges `type` from column definitions automatically
+- Server version compatibility check removed upper bound (supports ClickHouse 26.x+)
+- `clickhouse_erl_streaming_helpers` extracted from connection module (god_modules lint fix)
+- `ensure_binary_sql/1` helper extracted in `clickhouse_erl_app` (DRY fix)
+
 ## [0.4.0](https://github.com/couchemar/clickhouse_erl/releases/tag/v0.4.0) - 2026-04-25
 
 ### Added

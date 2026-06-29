@@ -125,10 +125,9 @@ streaming_no_accumulator_growth(Config) ->
 
     %% Callback that only counts — never accumulates row data
     Callback = fun
-        ({data, #{name := _Name, value := _Value}}, Count) ->
-            {ok, Count + 1};
-        ('end', Count) ->
-            {ok, Count}
+        (block_end, Count) -> {ok, Count};
+        ({data, #{name := _Name, value := _Value}}, Count) -> {ok, Count + 1};
+        ('end', Count) -> {ok, Count}
     end,
 
     SQL =
@@ -175,6 +174,8 @@ streaming_large_result_constant_memory(Config) ->
 
     %% Callback that maintains only a running count and sum — O(1) memory
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := <<"number">>, value := V}}, #{count := C, sum := S}) ->
             {ok, #{count => C + 1, sum => S + V}};
         ({data, #{name := _Other, value := _V}}, Acc) ->
@@ -268,6 +269,8 @@ parser_handles_multi_block_streaming(Config) ->
 
     %% Accumulate into column map to verify ordering across blocks
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := Name, value := Value}}, Acc) ->
             Existing = maps:get(Name, Acc, []),
             {ok, Acc#{Name => [Value | Existing]}};
@@ -325,6 +328,8 @@ chunk_ready_parsing_correctness(Config) ->
     lists:foreach(
         fun(N) ->
             Callback = fun
+                (block_end, Acc) ->
+                    {ok, Acc};
                 ({data, #{name := <<"number">>, value := V}}, {Count, Sum}) ->
                     {ok, {Count + 1, Sum + V}};
                 ({data, #{name := _Other, value := _V}}, Acc) ->

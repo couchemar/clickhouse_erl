@@ -467,6 +467,8 @@ encode_column(float32, Values) ->
     encode_float32_column(Values);
 encode_column(float64, Values) ->
     encode_float64_column(Values);
+encode_column(bool, Values) ->
+    encode_bool_column(Values);
 encode_column(string, Values) ->
     encode_string_column(Values);
 encode_column(date, Values) ->

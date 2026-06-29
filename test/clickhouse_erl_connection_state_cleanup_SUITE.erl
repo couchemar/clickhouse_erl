@@ -62,6 +62,7 @@ streaming_to_batch_no_state_leak(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     StreamingCallback = fun
+        (block_end, Acc) -> {ok, Acc};
         ('end', Acc) -> {ok, Acc};
         ({data, _}, Acc) -> {ok, Acc + 1}
     end,
@@ -117,6 +118,7 @@ batch_to_streaming_no_state_leak(_Config) ->
     undefined = maps:get(active_query_state, ConnInfo1),
 
     StreamingCallback = fun
+        (block_end, Acc) -> {ok, Acc};
         ('end', Acc) -> {ok, Acc};
         ({data, _}, Acc) -> {ok, Acc + 1}
     end,
@@ -143,6 +145,7 @@ multiple_mode_alternations(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     StreamingCallback = fun
+        (block_end, Acc) -> {ok, Acc};
         ('end', Acc) -> {ok, Acc};
         ({data, _}, Acc) -> {ok, Acc + 1}
     end,
@@ -186,6 +189,7 @@ different_callbacks_no_leak(_Config) ->
     {ok, Conn} = test_helpers:connect(),
 
     CountCallback = fun
+        (block_end, Acc) -> {ok, Acc};
         ('end', Acc) -> {ok, Acc};
         ({data, _}, Acc) -> {ok, Acc + 1}
     end,
@@ -203,6 +207,7 @@ different_callbacks_no_leak(_Config) ->
     undefined = maps:get(active_query_state, ConnInfo1),
 
     ListCallback = fun
+        (block_end, Acc) -> {ok, Acc};
         ('end', Acc) -> {ok, Acc};
         ({data, #{value := V}}, Acc) -> {ok, [V | Acc]}
     end,

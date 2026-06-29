@@ -281,20 +281,23 @@ parse_server_profile_events_test() ->
 
     % 6 columns * 42 rows = 252 value events
     % 6 column header events
-    % 1 start + 1 end = 2 events
-    % Total expected: 252 + 6 + 2 = 260
-    ?assertEqual(260, length(AllEvents)),
+    % 1 start + 1 end + 1 num_rows = 3 events
+    % Total expected: 252 + 6 + 3 = 261
+    ?assertEqual(261, length(AllEvents)),
 
     [StartEvent | RestEvents] = AllEvents,
     ?assertEqual({start, server_profile_events}, StartEvent),
 
+    %% num_rows event comes first, then column headers and values
+    [{data, num_rows, 42} | ColEvents] = RestEvents,
+
     %% Check first column header and values
-    {data, column, Col1} = hd(RestEvents),
+    {data, column, Col1} = hd(ColEvents),
     ?assertEqual(<<"host_name">>, maps:get(name, Col1)),
     ?assertEqual(<<"String">>, maps:get(type, Col1)),
 
     %% Check first few values of host_name
-    Val1 = lists:nth(2, RestEvents),
+    Val1 = lists:nth(2, ColEvents),
     ?assertEqual({data, column_value, <<"5942c23ea29a">>}, Val1),
 
     %% Check type enum mapping
@@ -320,6 +323,7 @@ parse_server_data_meta_test() ->
     ?assertEqual(
         [
             {start, server_data},
+            {data, num_rows, 0},
             {data, column, #{name => <<"id">>, type => <<"UInt32">>}},
             {data, column, #{name => <<"value">>, type => <<"String">>}},
             {'end', server_data}
@@ -841,9 +845,9 @@ parse_server_data_test() ->
 
     % 2 columns * 1000 rows = 2000 value events
     % 2 column header events
-    % 1 start + 1 end = 2 events
-    % Total expected: 2000 + 2 + 2 = 2004
-    ?assertEqual(2004, length(AllEvents)),
+    % 1 start + 1 end + 1 num_rows = 3 events
+    % Total expected: 2000 + 2 + 3 = 2005
+    ?assertEqual(2005, length(AllEvents)),
 
     [StartEvent | _] = AllEvents,
     ?assertEqual({start, server_data}, StartEvent),

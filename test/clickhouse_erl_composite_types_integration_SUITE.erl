@@ -7,14 +7,22 @@
     deeply_nested/1,
     empty_collections/1,
     large_dataset/1,
-    acceptance_criteria/1
+    acceptance_criteria/1,
+    bool_and_extended_types_in_composites/1
 ]).
 
 suite() ->
     [{timetrap, {seconds, 60}}].
 
 all() ->
-    [all_types_together, deeply_nested, empty_collections, large_dataset, acceptance_criteria].
+    [
+        all_types_together,
+        deeply_nested,
+        empty_collections,
+        large_dataset,
+        acceptance_criteria,
+        bool_and_extended_types_in_composites
+    ].
 
 init_per_suite(Config) ->
     test_helpers:setup(),
@@ -406,5 +414,81 @@ acceptance_criteria(_Config) ->
     #{<<"count">> := 100} = MapInTuple,
 
     {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE test_acceptance_criteria">>),
+    test_helpers:disconnect(Conn),
+    ok.
+
+%% Test Bool and extended integer types inside composite types
+%% Validates fix for {unknown_type, <<"Bool">>} in parse_column_type/1
+bool_and_extended_types_in_composites(_Config) ->
+    {ok, Conn} = test_helpers:connect(),
+
+    {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE IF EXISTS test_bool_extended">>),
+    {ok, _} = clickhouse_erl:query(
+        Conn,
+        <<
+            "CREATE TABLE test_bool_extended ("
+            "id UInt64, "
+            "bool_col Bool, "
+            "nullable_bool Nullable(Bool), "
+            "tuple_with_bool Tuple(Int64, Bool), "
+            "array_of_bool Array(Bool), "
+            "int128_col Int128, "
+            "uint256_col UInt256"
+            ") ENGINE = Memory"
+        >>
+    ),
+
+    InsertData = [
+        #{name => <<"id">>, type => <<"UInt64">>, data => [1, 2]},
+        #{name => <<"bool_col">>, type => <<"Bool">>, data => [true, false]},
+        #{
+            name => <<"nullable_bool">>,
+            type => <<"Nullable(Bool)">>,
+            data => [{value, true}, {null}]
+        },
+        #{
+            name => <<"tuple_with_bool">>,
+            type => <<"Tuple(Int64, Bool)">>,
+            data => [{42, true}, {0, false}]
+        },
+        #{
+            name => <<"array_of_bool">>,
+            type => <<"Array(Bool)">>,
+            data => [[true, false, true], [false]]
+        },
+        #{
+            name => <<"int128_col">>,
+            type => <<"Int128">>,
+            data => [123456789012345678, -987654321]
+        },
+        #{
+            name => <<"uint256_col">>,
+            type => <<"UInt256">>,
+            data => [99999999999999, 1]
+        }
+    ],
+
+    InsertSQL = <<"INSERT INTO test_bool_extended VALUES">>,
+    {ok, _} = clickhouse_erl:insert(Conn, InsertSQL, InsertData),
+
+    {ok, Result} = clickhouse_erl:query(
+        Conn, <<"SELECT * FROM test_bool_extended ORDER BY id">>
+    ),
+
+    #{data := #{rows := Rows}} = Result,
+    2 = length(Rows),
+
+    [Row1, Row2] = Rows,
+    %% Row 1: id=1, bool=true, nullable_bool=true(1), tuple={42,1}, array=[1,0,1]
+    [1, true, 1, {42, 1}, [1, 0, 1], Int128Val1, UInt256Val1] = Row1,
+    true = (Int128Val1 =:= 123456789012345678),
+    true = (UInt256Val1 =:= 99999999999999),
+
+    %% Row 2: id=2, bool=false, nullable_bool=null, tuple={0,0}, array=[0]
+    [2, false, null, {0, 0}, [0], Int128Val2, UInt256Val2] = Row2,
+    true = (Int128Val2 =:= -987654321),
+    true = (UInt256Val2 =:= 1),
+
+    {ok, _} = clickhouse_erl:query(Conn, <<"DROP TABLE test_bool_extended">>),
     test_helpers:disconnect(Conn),
     ok.

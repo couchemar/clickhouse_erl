@@ -313,3 +313,264 @@ optional_extra_keys_gen() ->
             maps:from_list([{K, fun(_) -> ok end} || K <- Selected])
         end
     ).
+
+%%%===================================================================
+%%% Feature: block-end-event, Property 3: Row count tracking round-trip
+%%%===================================================================
+
+%% Feature: block-end-event, Property 3: Row count tracking round-trip
+%% @doc Property 3: Row count tracking round-trip
+%% **Validates: Requirements 2.1, 2.2, 2.3**
+%%
+%% For any non-negative integer N, processing {start, server_data} followed by
+%% {data, num_rows, N} followed by {'end', server_data} results in:
+%% (a) current_block_rows being N before the end event, and
+%% (b) current_block_rows being 0 after the end event.
+prop_block_end_row_count_tracking_round_trip() ->
+    ?FORALL(
+        N,
+        non_neg_integer(),
+        begin
+            OnData = fun(_Event, Acc) -> {ok, Acc} end,
+            AccState = clickhouse_erl_connection:init_acc_state(#{
+                on_data => OnData,
+                accumulator => undefined
+            }),
+
+            %% Process {start, server_data} and {data, num_rows, N}
+            EventsBefore = [{start, server_data}, {data, num_rows, N}],
+            {false, false, false, AccAfterNumRows} =
+                clickhouse_erl_connection:process_events(EventsBefore, AccState),
+
+            %% (a) current_block_rows is N before the end event
+            RowsBeforeEnd = maps:get(current_block_rows, AccAfterNumRows, undefined),
+
+            %% Process {'end', server_data}
+            EventsEnd = [{'end', server_data}],
+            {false, false, false, AccAfterEnd} =
+                clickhouse_erl_connection:process_events(EventsEnd, AccAfterNumRows),
+
+            %% (b) current_block_rows is 0 after the end event
+            RowsAfterEnd = maps:get(current_block_rows, AccAfterEnd, undefined),
+
+            RowsBeforeEnd =:= N andalso RowsAfterEnd =:= 0
+        end
+    ).
+
+%%%===================================================================
+%%% Feature: block-end-event, Property 1: Block_end dispatch biconditional
+%%%===================================================================
+
+%% Feature: block-end-event, Property 1: Block_end dispatch biconditional
+%% @doc Property 1: Block_end dispatch biconditional
+%% **Validates: Requirements 1.1, 1.2, 4.1, 4.2**
+%%
+%% For any data-carrying block type (server_data, server_totals, server_extremes)
+%% and for any non-negative integer row count, processing {start, Type} ->
+%% {data, num_rows, NumRows} -> {'end', Type} dispatches block_end to the
+%% callback if and only if NumRows > 0.
+prop_block_end_dispatch_biconditional() ->
+    ?FORALL(
+        {BlockType, NumRows},
+        {oneof([server_data, server_totals, server_extremes]), non_neg_integer()},
+        begin
+            Self = self(),
+            OnData = fun
+                (block_end, Acc) ->
+                    Self ! got_block_end,
+                    {ok, Acc};
+                (_Event, Acc) ->
+                    {ok, Acc}
+            end,
+            AccState = clickhouse_erl_connection:init_acc_state(#{
+                on_data => OnData,
+                accumulator => undefined
+            }),
+
+            Events = [{start, BlockType}, {data, num_rows, NumRows}, {'end', BlockType}],
+            {false, false, false, _} =
+                clickhouse_erl_connection:process_events(Events, AccState),
+
+            GotBlockEnd =
+                receive
+                    got_block_end -> true
+                after 0 ->
+                    false
+                end,
+
+            %% block_end dispatched iff NumRows > 0
+            GotBlockEnd =:= (NumRows > 0)
+        end
+    ).
+
+%%%===================================================================
+%%% Feature: block-end-event, Property 2: Excluded block types never dispatch block_end
+%%%===================================================================
+
+%% Feature: block-end-event, Property 2: Excluded block types never dispatch block_end
+%% @doc Property 2: Excluded block types never dispatch block_end
+%% **Validates: Requirements 4.3**
+%%
+%% For any block type that is NOT data-carrying (server_log, server_profile_events),
+%% processing {'end', Type} SHALL NOT dispatch block_end to the callback,
+%% regardless of any row count stored in AccState.
+prop_block_end_excluded_block_types_never_dispatch() ->
+    ?FORALL(
+        {BlockType, NumRows},
+        {oneof([server_log, server_profile_events]), pos_integer()},
+        begin
+            Self = self(),
+            OnData = fun
+                (block_end, Acc) ->
+                    Self ! got_block_end,
+                    {ok, Acc};
+                (_Event, Acc) ->
+                    {ok, Acc}
+            end,
+            AccState = clickhouse_erl_connection:init_acc_state(#{
+                on_data => OnData,
+                accumulator => undefined
+            }),
+
+            %% Manually set up AccState as if we were in an excluded block type
+            %% We process through the normal event flow
+            Events = [{start, BlockType}, {data, num_rows, NumRows}, {'end', BlockType}],
+            clickhouse_erl_connection:process_events(Events, AccState),
+
+            %% Verify callback was NOT called with block_end
+            GotBlockEnd =
+                receive
+                    got_block_end -> true
+                after 0 ->
+                    false
+                end,
+
+            GotBlockEnd =:= false
+        end
+    ).
+
+%%%===================================================================
+%%% Feature: block-end-event, Property 4: Default callback idempotence on block_end
+%%%===================================================================
+
+%% Feature: block-end-event, Property 4: Default callback idempotence on block_end
+%% @doc Property 4: Default callback idempotence on block_end
+%% **Validates: Requirements 3.1**
+%%
+%% For any valid default callback accumulator (map with column_order,
+%% column_meta, column_values keys), calling default_on_data_callback(block_end, Acc)
+%% returns {ok, Acc} with the accumulator unchanged.
+prop_block_end_default_callback_idempotence() ->
+    ?FORALL(
+        Acc,
+        default_callback_acc_gen(),
+        begin
+            Result = clickhouse_erl_connection:default_on_data_callback(block_end, Acc),
+            Result =:= {ok, Acc}
+        end
+    ).
+
+%%%===================================================================
+%%% Feature: block-end-event, Property 5: Block_end count equals non-empty block count
+%%%===================================================================
+
+%% Feature: block-end-event, Property 5: Block_end count equals non-empty block count
+%% @doc Property 5: Block_end count equals non-empty block count
+%% **Validates: Requirements 5.3**
+%%
+%% For any sequence of parser events representing a query response with K blocks
+%% (mix of empty and non-empty), processing all events results in exactly as many
+%% block_end dispatches as there are non-empty blocks.
+prop_block_end_count_equals_nonempty_block_count() ->
+    ?FORALL(
+        Blocks,
+        non_empty(list(block_spec_gen())),
+        begin
+            Self = self(),
+            OnData = fun
+                (block_end, Acc) ->
+                    Self ! got_block_end,
+                    {ok, Acc};
+                (_Event, Acc) ->
+                    {ok, Acc}
+            end,
+            AccState = clickhouse_erl_connection:init_acc_state(#{
+                on_data => OnData,
+                accumulator => undefined
+            }),
+
+            %% Build full event sequence from block specs
+            Events = lists:flatmap(fun block_spec_to_events/1, Blocks),
+            clickhouse_erl_connection:process_events(Events, AccState),
+
+            %% Count block_end messages received
+            BlockEndCount = count_messages(got_block_end),
+
+            %% Count expected non-empty blocks
+            ExpectedCount = length([B || {_Type, NumRows} = B <- Blocks, NumRows > 0]),
+
+            BlockEndCount =:= ExpectedCount
+        end
+    ).
+
+%%%===================================================================
+%%% Block-end Generators
+%%%===================================================================
+
+%% @doc Generate a block spec: {BlockType, NumRows} where BlockType is data-carrying
+-spec block_spec_gen() -> proper_types:type().
+block_spec_gen() ->
+    {oneof([server_data, server_totals, server_extremes]), non_neg_integer()}.
+
+%% @doc Convert a block spec to a list of parser events
+-spec block_spec_to_events({atom(), non_neg_integer()}) -> [term()].
+block_spec_to_events({Type, NumRows}) ->
+    [{start, Type}, {data, num_rows, NumRows}, {'end', Type}].
+
+%% @doc Count messages of a given type in the mailbox
+-spec count_messages(term()) -> non_neg_integer().
+count_messages(Msg) ->
+    count_messages(Msg, 0).
+
+-spec count_messages(term(), non_neg_integer()) -> non_neg_integer().
+count_messages(Msg, Count) ->
+    receive
+        Msg -> count_messages(Msg, Count + 1)
+    after 0 ->
+        Count
+    end.
+
+%% @doc Generate random default callback accumulator maps
+-spec default_callback_acc_gen() -> proper_types:type().
+default_callback_acc_gen() ->
+    ?LET(
+        {ColNames, ColTypes, ColValues},
+        {list(non_empty(binary())), list(non_empty(binary())), list(list(binary()))},
+        begin
+            Names = lists:usort(ColNames),
+            MetaMap = maps:from_list([
+                {N, #{name => N, type => T}}
+             || {N, T} <- lists:zip(Names, pad_list(ColTypes, length(Names)))
+            ]),
+            ValuesMap = maps:from_list([
+                {N, V}
+             || {N, V} <- lists:zip(Names, pad_list(ColValues, length(Names)))
+            ]),
+            #{
+                column_order => Names,
+                column_meta => MetaMap,
+                column_values => ValuesMap
+            }
+        end
+    ).
+
+%% @doc Pad a list to at least Length elements by cycling
+-spec pad_list(list(), non_neg_integer()) -> list().
+pad_list([], 0) ->
+    [];
+pad_list([], N) ->
+    lists:duplicate(N, <<>>);
+pad_list(List, N) when length(List) >= N -> lists:sublist(List, N);
+pad_list(List, N) ->
+    Repeated = lists:flatten(lists:duplicate((N div length(List)) + 1, List)),
+    lists:sublist(Repeated, N).

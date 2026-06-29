@@ -565,10 +565,9 @@ streaming_large_result_set(Config) ->
     %% Stream 100k rows using column-name-tagged callback
     SQL = <<"SELECT number FROM system.numbers LIMIT 100000">>,
     Callback = fun
-        ({data, #{name := _Name, value := _Value}}, Acc) ->
-            {ok, Acc + 1};
-        ('end', Acc) ->
-            {ok, Acc}
+        (block_end, Acc) -> {ok, Acc};
+        ({data, #{name := _Name, value := _Value}}, Acc) -> {ok, Acc + 1};
+        ('end', Acc) -> {ok, Acc}
     end,
 
     {ok, Result} = clickhouse_erl:query(Conn, SQL, #{
@@ -588,10 +587,9 @@ streaming_multiple_queries(Config) ->
             Limit = N * 1000,
             SQL = <<"SELECT number FROM system.numbers LIMIT ", (integer_to_binary(Limit))/binary>>,
             Callback = fun
-                ({data, #{name := _Name, value := _Value}}, Acc) ->
-                    {ok, Acc + 1};
-                ('end', Acc) ->
-                    {ok, Acc}
+                (block_end, Acc) -> {ok, Acc};
+                ({data, #{name := _Name, value := _Value}}, Acc) -> {ok, Acc + 1};
+                ('end', Acc) -> {ok, Acc}
             end,
 
             {ok, Result} = clickhouse_erl:query(Conn, SQL, #{
@@ -759,6 +757,8 @@ regression_existing_streaming_suite(_Config) ->
 
     %% Test streaming callback with column-name-tagged events
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := Name, value := Value}}, Acc) ->
             Existing = maps:get(Name, Acc, []),
             {ok, Acc#{Name => [Value | Existing]}};

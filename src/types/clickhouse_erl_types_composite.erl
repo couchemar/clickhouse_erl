@@ -112,11 +112,13 @@
     % Type parsing (Phase 1.2, 1.3)
     parse_type_params/1,
     parse_column_type/1,
+    % Type serialization
+    type_to_binary/1,
     % Type validation
     validate_type_compatibility/2
 ]).
 
--ignore_xref([validate_type_compatibility/2]).
+-ignore_xref([validate_type_compatibility/2, type_to_binary/1]).
 
 %% Type definitions
 -type column_type() ::
@@ -132,16 +134,22 @@
     | int16
     | int32
     | int64
+    | int128
+    | uint128
+    | int256
+    | uint256
     | float32
     | float64
     | string
+    | bool
     | date
     | date32
     | datetime
     | datetime64
     | uuid
     | ipv4
-    | ipv6.
+    | ipv6
+    | nothing.
 
 -type composite_type() ::
     {array, column_type()}
@@ -246,6 +254,12 @@ parse_column_type(Type) when is_binary(Type) ->
         <<"UUID">> -> uuid;
         <<"IPv4">> -> ipv4;
         <<"IPv6">> -> ipv6;
+        <<"Bool">> -> bool;
+        <<"Int128">> -> int128;
+        <<"UInt128">> -> uint128;
+        <<"Int256">> -> int256;
+        <<"UInt256">> -> uint256;
+        <<"Nothing">> -> nothing;
         _ -> parse_composite_type(Type)
     end.
 
@@ -275,6 +289,84 @@ parse_type_name_and_params(Type) ->
         [Name] ->
             {string:trim(Name), []}
     end.
+
+%%%===================================================================
+%%% Type Serialization
+%%%===================================================================
+
+%% @doc Convert a parsed column type term back to a ClickHouse type binary string.
+%%
+%% This is the inverse of `parse_column_type/1`. For all supported types,
+%% `parse_column_type(type_to_binary(T)) =:= T` holds.
+%%
+%% Examples:
+%% ```
+%% <<"UInt32">> = clickhouse_erl_types_composite:type_to_binary(uint32).
+%% <<"Array(String)">> = clickhouse_erl_types_composite:type_to_binary({array, string}).
+%% <<"Map(String, Int64)">> = clickhouse_erl_types_composite:type_to_binary({map, string, int64}).
+%% '''
+-spec type_to_binary(column_type()) -> binary().
+type_to_binary(uint8) ->
+    <<"UInt8">>;
+type_to_binary(uint16) ->
+    <<"UInt16">>;
+type_to_binary(uint32) ->
+    <<"UInt32">>;
+type_to_binary(uint64) ->
+    <<"UInt64">>;
+type_to_binary(int8) ->
+    <<"Int8">>;
+type_to_binary(int16) ->
+    <<"Int16">>;
+type_to_binary(int32) ->
+    <<"Int32">>;
+type_to_binary(int64) ->
+    <<"Int64">>;
+type_to_binary(float32) ->
+    <<"Float32">>;
+type_to_binary(float64) ->
+    <<"Float64">>;
+type_to_binary(string) ->
+    <<"String">>;
+type_to_binary(date) ->
+    <<"Date">>;
+type_to_binary(date32) ->
+    <<"Date32">>;
+type_to_binary(datetime) ->
+    <<"DateTime">>;
+type_to_binary(datetime64) ->
+    <<"DateTime64">>;
+type_to_binary(bool) ->
+    <<"Bool">>;
+type_to_binary(int128) ->
+    <<"Int128">>;
+type_to_binary(uint128) ->
+    <<"UInt128">>;
+type_to_binary(int256) ->
+    <<"Int256">>;
+type_to_binary(uint256) ->
+    <<"UInt256">>;
+type_to_binary(nothing) ->
+    <<"Nothing">>;
+type_to_binary(uuid) ->
+    <<"UUID">>;
+type_to_binary(ipv4) ->
+    <<"IPv4">>;
+type_to_binary(ipv6) ->
+    <<"IPv6">>;
+type_to_binary({array, InnerType}) ->
+    <<"Array(", (type_to_binary(InnerType))/binary, ")">>;
+type_to_binary({tuple, ElementTypes}) ->
+    ElementStrs = [type_to_binary(T) || T <- ElementTypes],
+    <<"Tuple(", (iolist_to_binary(lists:join(<<", ">>, ElementStrs)))/binary, ")">>;
+type_to_binary({map, KeyType, ValueType}) ->
+    <<"Map(", (type_to_binary(KeyType))/binary, ", ", (type_to_binary(ValueType))/binary, ")">>;
+type_to_binary({nullable, InnerType}) ->
+    <<"Nullable(", (type_to_binary(InnerType))/binary, ")">>;
+type_to_binary({low_cardinality, InnerType}) ->
+    <<"LowCardinality(", (type_to_binary(InnerType))/binary, ")">>;
+type_to_binary(Type) when is_atom(Type) ->
+    atom_to_binary(Type).
 
 %%%===================================================================
 %%% Type Validation

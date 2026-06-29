@@ -497,6 +497,8 @@
     init_acc_state/1,
     % Event processing (exported for testing)
     process_events/2,
+    % Single event processing (exported for testing)
+    process_single_event/5,
     % Query result building (exported for testing)
     build_query_result/1,
     % Default streaming callback (exported for testing and fun reference)
@@ -537,6 +539,7 @@
     validate_and_normalize_compression_opts/1,
     init_acc_state/1,
     process_events/2,
+    process_single_event/5,
     build_query_result/1,
     default_on_data_callback/2,
     default_on_log_callback/1,
@@ -2664,7 +2667,7 @@ check_protocol_compatibility(ServerInfo) ->
             % For now, we'll use a simple compatibility check based on major version
             % In a real implementation, this would be more sophisticated
             case ServerMajor of
-                Major when Major >= 20 andalso Major =< 25 ->
+                Major when Major >= 20 ->
                     ok;
                 _UnsupportedMajor ->
                     ServerVersion = {ServerMajor, ServerMinor, ServerPatch},
@@ -3613,6 +3616,10 @@ process_single_event({start, server_log}, EosAcc, NmAcc, ExAcc, Acc) ->
         log_column_order => [],
         log_current_column => undefined
     }};
+process_single_event({start, Type}, EosAcc, NmAcc, ExAcc, Acc) when
+    Type =:= server_data; Type =:= server_totals; Type =:= server_extremes
+->
+    {EosAcc, NmAcc, ExAcc, Acc#{current_block_type => Type, current_block_rows => 0}};
 process_single_event({start, Type}, EosAcc, NmAcc, ExAcc, Acc) ->
     {EosAcc, NmAcc, ExAcc, Acc#{current_block_type => Type}};
 process_single_event({'end', server_end_of_stream}, _EosAcc, NmAcc, ExAcc, Acc) ->
@@ -3623,7 +3630,23 @@ process_single_event({'end', server_exception}, EosAcc, NmAcc, _ExAcc, Acc) ->
 process_single_event({'end', Type}, EosAcc, NmAcc, ExAcc, Acc) when
     Type =:= server_data; Type =:= server_totals; Type =:= server_extremes
 ->
-    {EosAcc, NmAcc, ExAcc, Acc#{current_block_type => undefined}};
+    case maps:get(current_block_rows, Acc, 0) of
+        0 ->
+            {EosAcc, NmAcc, ExAcc, Acc#{
+                current_block_type => undefined,
+                current_block_rows => 0
+            }};
+        _N ->
+            case dispatch_block_end(EosAcc, NmAcc, ExAcc, Acc) of
+                {callback_error, _} = Err ->
+                    Err;
+                {NewEos, NewNm, NewEx, NewAcc} ->
+                    {NewEos, NewNm, NewEx, NewAcc#{
+                        current_block_type => undefined,
+                        current_block_rows => 0
+                    }}
+            end
+    end;
 process_single_event({'end', server_log}, EosAcc, NmAcc, ExAcc, Acc) ->
     LogColumns = maps:get(log_columns, Acc, #{}),
     LogColumnOrder = maps:get(log_column_order, Acc, []),
@@ -3692,6 +3715,13 @@ process_single_event({data, column_value, Value}, EosAcc, NmAcc, ExAcc, Acc) ->
 process_single_event({data, wrote_rows, WroteRows}, EosAcc, NmAcc, ExAcc, Acc) ->
     PrevWritten = maps:get(rows_written, Acc, 0),
     {EosAcc, NmAcc, ExAcc, Acc#{rows_written => PrevWritten + WroteRows}};
+process_single_event({data, num_rows, NumRows}, EosAcc, NmAcc, ExAcc, Acc) ->
+    case maps:get(current_block_type, Acc, undefined) of
+        Type when Type =:= server_data; Type =:= server_totals; Type =:= server_extremes ->
+            {EosAcc, NmAcc, ExAcc, Acc#{current_block_rows => NumRows}};
+        _ ->
+            {EosAcc, NmAcc, ExAcc, Acc}
+    end;
 process_single_event({data, _Field, _Value}, EosAcc, NmAcc, ExAcc, Acc) ->
     {EosAcc, NmAcc, ExAcc, Acc}.
 
@@ -3699,20 +3729,24 @@ process_single_event({data, _Field, _Value}, EosAcc, NmAcc, ExAcc, Acc) ->
 %% Used when the user does not provide an `on_data' callback. Accumulates
 %% column values in a map and transposes to row-oriented format on `'end''.
 %%
-%% Handles three event types:
+%% Handles four event types:
 %% - `{column_meta, #{name, type}}' — stores column metadata (first occurrence wins)
 %% - `{data, #{name, value}}' — accumulates value under column name
+%% - `block_end' — block boundary signal; default callback ignores it (returns Acc unchanged)
 %% - `'end'' — reverses value lists, transposes to `#{columns, rows}'
 %%
-%% Returns `{ok, NewAcc}' for data/column_meta events, and
+%% Returns `{ok, NewAcc}' for data/column_meta/block_end events, and
 %% `{ok, #{columns => [...], rows => [...]}' for the `'end'' event.
 -spec default_on_data_callback(Event, Acc) -> {ok, NewAcc} when
     Event ::
         {data, #{name := binary(), value := term()}}
         | {column_meta, #{name := binary(), type := binary()}}
+        | block_end
         | 'end',
     Acc :: default_callback_acc(),
     NewAcc :: default_callback_acc() | batch_result().
+default_on_data_callback(block_end, Acc) ->
+    {ok, Acc};
 default_on_data_callback({column_meta, #{name := ColName, type := ColType}}, Acc) ->
     #{column_order := Order, column_meta := Meta} = Acc,
     %% First occurrence wins (Req 5.3)
@@ -3824,6 +3858,29 @@ invoke_streaming_callback(Callback, Value, EosAcc, NmAcc, ExAcc, Acc) ->
     ColType = maps:get(current_column_type, Acc, undefined),
     UserAcc = maps:get(user_acc, Acc),
     try Callback({data, #{name => ColName, type => ColType, value => Value}}, UserAcc) of
+        {ok, NewUserAcc} ->
+            {EosAcc, NmAcc, ExAcc, Acc#{user_acc => NewUserAcc}};
+        {error, Reason} ->
+            {callback_error, Reason};
+        Other ->
+            {callback_error, {invalid_callback_return, Other}}
+    catch
+        error:Err:Stack ->
+            {callback_error, {callback_crashed, {error, Err, Stack}}}
+    end.
+
+%% @doc Dispatch the block_end event through the streaming callback.
+%% Invoked when an end-of-block parser event is processed for a data-carrying
+%% block type with a non-zero row count. Mirrors invoke_streaming_callback/6
+%% but dispatches the bare atom `block_end` instead of a {data, ...} tuple.
+%%
+%% Requirements: 1.3, 3.2
+-spec dispatch_block_end(boolean(), boolean(), boolean(), map()) ->
+    {boolean(), boolean(), boolean(), map()} | {callback_error, term()}.
+dispatch_block_end(EosAcc, NmAcc, ExAcc, Acc) ->
+    Callback = maps:get(on_data_callback, Acc),
+    UserAcc = maps:get(user_acc, Acc),
+    try Callback(block_end, UserAcc) of
         {ok, NewUserAcc} ->
             {EosAcc, NmAcc, ExAcc, Acc#{user_acc => NewUserAcc}};
         {error, Reason} ->

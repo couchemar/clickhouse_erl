@@ -187,6 +187,8 @@ get_placeholder_value(float32) ->
     0.0;
 get_placeholder_value(float64) ->
     0.0;
+get_placeholder_value(bool) ->
+    false;
 get_placeholder_value(string) ->
     <<>>;
 get_placeholder_value(date) ->
@@ -281,7 +283,7 @@ decode_values_column(Binary, {low_cardinality, InnerType}, RowCount) ->
     );
 decode_values_column(Binary, InnerType, RowCount) ->
     %% Convert type to binary string for data block decoder
-    TypeStr = type_to_binary(InnerType),
+    TypeStr = clickhouse_erl_types_composite:type_to_binary(InnerType),
     clickhouse_erl_protocol_data_block:decode_column_data(TypeStr, RowCount, Binary).
 
 %% @doc Combine null mask and values into nullable values.
@@ -295,51 +297,3 @@ combine_mask_and_values(NullMask, Values) ->
         NullMask,
         Values
     ).
-
-%% @doc Convert parsed type back to binary string for decoding.
--spec type_to_binary(clickhouse_erl_types_composite:column_type()) -> binary().
-type_to_binary(uint8) ->
-    <<"UInt8">>;
-type_to_binary(uint16) ->
-    <<"UInt16">>;
-type_to_binary(uint32) ->
-    <<"UInt32">>;
-type_to_binary(uint64) ->
-    <<"UInt64">>;
-type_to_binary(int8) ->
-    <<"Int8">>;
-type_to_binary(int16) ->
-    <<"Int16">>;
-type_to_binary(int32) ->
-    <<"Int32">>;
-type_to_binary(int64) ->
-    <<"Int64">>;
-type_to_binary(float32) ->
-    <<"Float32">>;
-type_to_binary(float64) ->
-    <<"Float64">>;
-type_to_binary(string) ->
-    <<"String">>;
-type_to_binary(date) ->
-    <<"Date">>;
-type_to_binary(date32) ->
-    <<"Date32">>;
-type_to_binary(datetime) ->
-    <<"DateTime">>;
-type_to_binary(datetime64) ->
-    <<"DateTime64">>;
-type_to_binary({tuple, ElementTypes}) ->
-    %% Reconstruct tuple type string
-    ElementStrs = [type_to_binary(T) || T <- ElementTypes],
-    <<"Tuple(", (iolist_to_binary(lists:join(<<", ">>, ElementStrs)))/binary, ")">>;
-type_to_binary({array, ElemType}) ->
-    <<"Array(", (type_to_binary(ElemType))/binary, ")">>;
-type_to_binary({map, KeyType, ValueType}) ->
-    <<"Map(", (type_to_binary(KeyType))/binary, ", ", (type_to_binary(ValueType))/binary, ")">>;
-type_to_binary({nullable, InnerType}) ->
-    <<"Nullable(", (type_to_binary(InnerType))/binary, ")">>;
-type_to_binary({low_cardinality, InnerType}) ->
-    <<"LowCardinality(", (type_to_binary(InnerType))/binary, ")">>;
-type_to_binary(Type) ->
-    %% Fallback for unknown types
-    atom_to_binary(Type).

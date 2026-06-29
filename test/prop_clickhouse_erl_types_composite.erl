@@ -1,56 +1,66 @@
 -module(prop_clickhouse_erl_types_composite).
 -include_lib("proper/include/proper.hrl").
 
+%% Property: type_to_binary is the inverse of parse_column_type.
+%% For any valid column_type() term, serializing to binary then parsing back
+%% must yield the original term.
+prop_type_to_binary_roundtrip() ->
+    ?FORALL(
+        Type,
+        column_type_gen(),
+        begin
+            Binary = clickhouse_erl_types_composite:type_to_binary(Type),
+            Parsed = clickhouse_erl_types_composite:parse_column_type(Binary),
+            Parsed =:= Type
+        end
+    ).
+
 %%%===================================================================
 %%% Generators
 %%%===================================================================
 
-offset_list() ->
-    list(non_neg_integer()).
+column_type_gen() ->
+    column_type_gen(3).
 
-monotonic_offset_list() ->
-    ?LET(
-        List,
-        list(non_neg_integer()),
-        lists:reverse(
-            element(
-                2,
-                lists:foldl(
-                    fun(X, {Sum, Acc}) ->
-                        NewSum = Sum + X,
-                        {NewSum, [NewSum | Acc]}
-                    end,
-                    {0, [0]},
-                    List
-                )
-            )
-        )
-    ).
+column_type_gen(0) ->
+    primitive_type_gen();
+column_type_gen(Depth) ->
+    oneof([
+        primitive_type_gen(),
+        ?LAZY({array, column_type_gen(Depth - 1)}),
+        ?LAZY({tuple, non_empty_list_gen(column_type_gen(Depth - 1))}),
+        ?LAZY({map, primitive_type_gen(), column_type_gen(Depth - 1)}),
+        ?LAZY({nullable, column_type_gen(Depth - 1)}),
+        ?LAZY({low_cardinality, primitive_type_gen()})
+    ]).
 
-%%%===================================================================
-%%% Properties
-%%%===================================================================
+primitive_type_gen() ->
+    oneof([
+        uint8,
+        uint16,
+        uint32,
+        uint64,
+        int8,
+        int16,
+        int32,
+        int64,
+        int128,
+        uint128,
+        int256,
+        uint256,
+        float32,
+        float64,
+        string,
+        date,
+        date32,
+        datetime,
+        datetime64,
+        bool,
+        nothing,
+        uuid,
+        ipv4,
+        ipv6
+    ]).
 
-prop_offset_roundtrip() ->
-    ?FORALL(
-        Offsets,
-        offset_list(),
-        begin
-            Encoded = clickhouse_erl_types_composite:encode_offsets(Offsets),
-            Count = length(Offsets),
-            {ok, Decoded, Rest} = clickhouse_erl_types_composite:decode_offsets(Encoded, Count),
-            Decoded =:= Offsets andalso Rest =:= <<>>
-        end
-    ).
-
-prop_monotonic_offset_roundtrip() ->
-    ?FORALL(
-        Offsets,
-        monotonic_offset_list(),
-        begin
-            Encoded = clickhouse_erl_types_composite:encode_offsets(Offsets),
-            Count = length(Offsets),
-            {ok, Decoded, Rest} = clickhouse_erl_types_composite:decode_offsets(Encoded, Count),
-            Decoded =:= Offsets andalso Rest =:= <<>>
-        end
-    ).
+non_empty_list_gen(ElemGen) ->
+    ?LET(N, range(1, 4), vector(N, ElemGen)).

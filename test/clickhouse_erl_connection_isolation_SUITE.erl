@@ -47,6 +47,8 @@ concurrent_queries_with_blocking_callback(_Config) ->
     ),
 
     BlockingCallback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ('end', Acc) ->
             {ok, Acc};
         ({data, _Event}, Acc) ->
@@ -55,6 +57,7 @@ concurrent_queries_with_blocking_callback(_Config) ->
     end,
 
     NormalCallback = fun
+        (block_end, Acc) -> {ok, Acc};
         ('end', Acc) -> {ok, Acc};
         ({data, _Event}, Acc) -> {ok, Acc + 1}
     end,
@@ -129,6 +132,7 @@ multiple_concurrent_queries(_Config) ->
     ),
 
     CountCallback = fun
+        (block_end, Acc) -> {ok, Acc};
         ('end', Acc) -> {ok, Acc};
         ({data, _}, Acc) -> {ok, Acc + 1}
     end,
@@ -211,6 +215,7 @@ callback_crash_isolation(_Config) ->
     end,
 
     NormalCallback = fun
+        (block_end, Acc) -> {ok, Acc};
         ('end', Acc) -> {ok, Acc};
         ({data, _}, Acc) -> {ok, Acc + 1}
     end,
@@ -286,6 +291,7 @@ callback_error_isolation(_Config) ->
     end,
 
     NormalCallback = fun
+        (block_end, Acc) -> {ok, Acc};
         ('end', Acc) -> {ok, Acc};
         ({data, _}, Acc) -> {ok, Acc + 1}
     end,

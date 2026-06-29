@@ -91,3 +91,45 @@ parse_complex_nested_test() ->
     Input = "Map(String, Array(Nullable(UInt64)))",
     Expected = {map, string, {array, {nullable, uint64}}},
     ?assertEqual(Expected, clickhouse_erl_types_composite:parse_column_type(Input)).
+
+parse_bool_test() ->
+    ?assertEqual(bool, clickhouse_erl_types_composite:parse_column_type("Bool")).
+
+parse_int128_test() ->
+    ?assertEqual(int128, clickhouse_erl_types_composite:parse_column_type("Int128")).
+
+parse_uint128_test() ->
+    ?assertEqual(uint128, clickhouse_erl_types_composite:parse_column_type("UInt128")).
+
+parse_int256_test() ->
+    ?assertEqual(int256, clickhouse_erl_types_composite:parse_column_type("Int256")).
+
+parse_uint256_test() ->
+    ?assertEqual(uint256, clickhouse_erl_types_composite:parse_column_type("UInt256")).
+
+parse_nothing_test() ->
+    ?assertEqual(nothing, clickhouse_erl_types_composite:parse_column_type("Nothing")).
+
+parse_nullable_bool_test() ->
+    ?assertEqual(
+        {nullable, bool},
+        clickhouse_erl_types_composite:parse_column_type("Nullable(Bool)")
+    ).
+
+parse_tuple_with_bool_test() ->
+    ?assertEqual(
+        {tuple, [int64, bool]},
+        clickhouse_erl_types_composite:parse_column_type("Tuple(Int64, Bool)")
+    ).
+
+parse_array_of_int128_test() ->
+    ?assertEqual(
+        {array, int128},
+        clickhouse_erl_types_composite:parse_column_type("Array(Int128)")
+    ).
+
+parse_map_with_uint256_value_test() ->
+    ?assertEqual(
+        {map, string, uint256},
+        clickhouse_erl_types_composite:parse_column_type("Map(String, UInt256)")
+    ).

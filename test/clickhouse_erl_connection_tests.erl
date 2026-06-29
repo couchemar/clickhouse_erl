@@ -935,6 +935,208 @@ add_optional_callbacks_on_log_test() ->
 %%% Feature: on-log-callback
 %%%===================================================================
 
+%%%===================================================================
+%%% Block Row Count Tracking Tests (Task 1.3)
+%%% Feature: block-end-event
+%%%===================================================================
+
+%% Test: current_block_rows is 0 after processing {start, server_data}
+%% Validates: Requirements 2.1, 2.3
+current_block_rows_initialized_on_start_test() ->
+    AccState = clickhouse_erl_connection:init_acc_state(#{}),
+    Event = {start, server_data},
+    {false, false, false, NewAcc} =
+        clickhouse_erl_connection:process_single_event(Event, false, false, false, AccState),
+    ?assertEqual(0, maps:get(current_block_rows, NewAcc)).
+
+%% Test: current_block_rows stores the NumRows value after {data, num_rows, N}
+%% Validates: Requirements 2.1, 2.2
+current_block_rows_stored_on_num_rows_test() ->
+    AccState = clickhouse_erl_connection:init_acc_state(#{}),
+    %% First process {start, server_data} to set block type
+    {false, false, false, Acc1} =
+        clickhouse_erl_connection:process_single_event(
+            {start, server_data}, false, false, false, AccState
+        ),
+    %% Then process {data, num_rows, 42}
+    {false, false, false, Acc2} =
+        clickhouse_erl_connection:process_single_event(
+            {data, num_rows, 42}, false, false, false, Acc1
+        ),
+    ?assertEqual(42, maps:get(current_block_rows, Acc2)).
+
+%% Test: current_block_rows is reset to 0 after processing {'end', server_data}
+%% NOTE: This test documents EXPECTED behavior after task 2.2 is implemented.
+%% Currently {'end', server_data} does NOT clear current_block_rows.
+%% Validates: Requirements 2.2, 2.3
+current_block_rows_cleared_on_end_test() ->
+    AccState = clickhouse_erl_connection:init_acc_state(#{}),
+    %% Set up: start block, set num_rows
+    {false, false, false, Acc1} =
+        clickhouse_erl_connection:process_single_event(
+            {start, server_data}, false, false, false, AccState
+        ),
+    {false, false, false, Acc2} =
+        clickhouse_erl_connection:process_single_event(
+            {data, num_rows, 100}, false, false, false, Acc1
+        ),
+    ?assertEqual(100, maps:get(current_block_rows, Acc2)),
+    %% Process {'end', server_data} — should clear current_block_rows to 0
+    {false, false, false, Acc3} =
+        clickhouse_erl_connection:process_single_event(
+            {'end', server_data}, false, false, false, Acc2
+        ),
+    ?assertEqual(0, maps:get(current_block_rows, Acc3, undefined)).
+
+%%%===================================================================
+%%% Block End Dispatch Tests (Task 3.1)
+%%% Feature: block-end-event
+%%%===================================================================
+
+%% Test: block_end dispatched when block has rows > 0
+%% Validates: Requirements 1.1, 4.1
+block_end_dispatched_for_nonempty_block_test() ->
+    Self = self(),
+    OnData = fun
+        (block_end, Acc) ->
+            Self ! got_block_end,
+            {ok, Acc#{got_block_end => true}};
+        (_Event, Acc) ->
+            {ok, Acc}
+    end,
+    AccState = clickhouse_erl_connection:init_acc_state(#{
+        on_data => OnData,
+        accumulator => #{}
+    }),
+    Events = [{start, server_data}, {data, num_rows, 5}, {'end', server_data}],
+    {false, false, false, _} = clickhouse_erl_connection:process_events(Events, AccState),
+    receive
+        got_block_end -> ok
+    after 100 ->
+        ?assert(false)
+    end.
+
+%% Test: block_end NOT dispatched when block has 0 rows
+%% Validates: Requirements 1.2
+block_end_not_dispatched_for_empty_block_test() ->
+    Self = self(),
+    OnData = fun
+        (block_end, Acc) ->
+            Self ! got_block_end,
+            {ok, Acc};
+        (_Event, Acc) ->
+            {ok, Acc}
+    end,
+    AccState = clickhouse_erl_connection:init_acc_state(#{
+        on_data => OnData,
+        accumulator => #{}
+    }),
+    Events = [{start, server_data}, {data, num_rows, 0}, {'end', server_data}],
+    {false, false, false, _} = clickhouse_erl_connection:process_events(Events, AccState),
+    receive
+        got_block_end -> ?assert(false)
+    after 0 ->
+        ok
+    end.
+
+%% Test: block_end dispatched for server_totals block
+%% Validates: Requirements 4.1
+block_end_dispatched_for_totals_test() ->
+    Self = self(),
+    OnData = fun
+        (block_end, Acc) ->
+            Self ! got_block_end,
+            {ok, Acc};
+        (_Event, Acc) ->
+            {ok, Acc}
+    end,
+    AccState = clickhouse_erl_connection:init_acc_state(#{
+        on_data => OnData,
+        accumulator => #{}
+    }),
+    Events = [{start, server_totals}, {data, num_rows, 1}, {'end', server_totals}],
+    {false, false, false, _} = clickhouse_erl_connection:process_events(Events, AccState),
+    receive
+        got_block_end -> ok
+    after 100 ->
+        ?assert(false)
+    end.
+
+%% Test: block_end dispatched for server_extremes block
+%% Validates: Requirements 4.2
+block_end_dispatched_for_extremes_test() ->
+    Self = self(),
+    OnData = fun
+        (block_end, Acc) ->
+            Self ! got_block_end,
+            {ok, Acc};
+        (_Event, Acc) ->
+            {ok, Acc}
+    end,
+    AccState = clickhouse_erl_connection:init_acc_state(#{
+        on_data => OnData,
+        accumulator => #{}
+    }),
+    Events = [{start, server_extremes}, {data, num_rows, 2}, {'end', server_extremes}],
+    {false, false, false, _} = clickhouse_erl_connection:process_events(Events, AccState),
+    receive
+        got_block_end -> ok
+    after 100 ->
+        ?assert(false)
+    end.
+
+%% Test: block_end NOT dispatched for server_log block type
+%% Validates: Requirements 4.3
+block_end_not_dispatched_for_log_test() ->
+    Self = self(),
+    OnData = fun
+        (block_end, Acc) ->
+            Self ! got_block_end,
+            {ok, Acc};
+        (_Event, Acc) ->
+            {ok, Acc}
+    end,
+    AccState = clickhouse_erl_connection:init_acc_state(#{
+        on_data => OnData,
+        accumulator => #{}
+    }),
+    Events = [{start, server_log}, {data, num_rows, 5}, {'end', server_log}],
+    clickhouse_erl_connection:process_events(Events, AccState),
+    receive
+        got_block_end -> ?assert(false)
+    after 0 ->
+        ok
+    end.
+
+%% Test: default_on_data_callback handles block_end returning {ok, Acc}
+%% Validates: Requirements 3.1
+default_callback_handles_block_end_test() ->
+    Acc = #{column_order => [], column_meta => #{}, column_values => #{}},
+    Result = clickhouse_erl_connection:default_on_data_callback(block_end, Acc),
+    ?assertEqual({ok, Acc}, Result).
+
+%% Test: callback error propagation on block_end event
+%% Validates: Requirements 3.2
+callback_error_propagation_on_block_end_test() ->
+    OnData = fun
+        (block_end, _Acc) ->
+            error(intentional_crash);
+        (_Event, Acc) ->
+            {ok, Acc}
+    end,
+    AccState = clickhouse_erl_connection:init_acc_state(#{
+        on_data => OnData,
+        accumulator => #{}
+    }),
+    Events = [{start, server_data}, {data, num_rows, 10}, {'end', server_data}],
+    Result = clickhouse_erl_connection:process_events(Events, AccState),
+    ?assertMatch({callback_error, {callback_crashed, {error, intentional_crash, _}}}, Result).
+
+%%%===================================================================
+%%% Backward Compatibility and Default Logging Callback Tests (Task 6.1)
+%%% Feature: on-log-callback
+%%%===================================================================
+
 %% Test: default_on_log_callback/1 returns ok when invoked with a log entry map
 %% Validates: Requirements 1.2, 6.2
 default_on_log_callback_returns_ok_test() ->

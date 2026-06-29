@@ -114,6 +114,8 @@ accumulate_two_columns_into_map(Config) ->
     ),
 
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := Name, value := Value}}, Acc) ->
             Existing = maps:get(Name, Acc, []),
             {ok, Acc#{Name => [Value | Existing]}};
@@ -145,6 +147,8 @@ accumulate_single_column(Config) ->
     Conn = ?config(connection, Config),
 
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := Name, value := Value}}, Acc) ->
             Existing = maps:get(Name, Acc, []),
             {ok, Acc#{Name => [Value | Existing]}};
@@ -179,6 +183,8 @@ accumulate_three_columns(Config) ->
     ),
 
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := Name, value := Value}}, Acc) ->
             Existing = maps:get(Name, Acc, []),
             {ok, Acc#{Name => [Value | Existing]}};
@@ -210,6 +216,8 @@ end_event_triggers_reverse(Config) ->
 
     %% Accumulate in reverse (prepend), then reverse on 'end'
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := Name, value := Value}}, Acc) ->
             Existing = maps:get(Name, Acc, []),
             {ok, Acc#{Name => [Value | Existing]}};
@@ -236,6 +244,8 @@ end_event_custom_finalization(Config) ->
 
     %% Count values during streaming, compute summary on 'end'
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := _Name, value := Value}}, #{count := C, sum := S}) ->
             {ok, #{count => C + 1, sum => S + Value}};
         ('end', #{count := C, sum := S}) ->
@@ -274,6 +284,8 @@ multi_block_merge_via_callback(Config) ->
     ),
 
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := Name, value := Value}}, Acc) ->
             Existing = maps:get(Name, Acc, []),
             {ok, Acc#{Name => [Value | Existing]}};
@@ -315,6 +327,8 @@ empty_result_only_end_event(Config) ->
 
     %% Track whether data events were received
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := _Name, value := _Value}}, #{data_count := C} = Acc) ->
             {ok, Acc#{data_count => C + 1}};
         ('end', Acc) ->
@@ -336,6 +350,8 @@ empty_result_preserves_initial_accumulator(Config) ->
     Conn = ?config(connection, Config),
 
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := Name, value := Value}}, Acc) ->
             Existing = maps:get(Name, Acc, []),
             {ok, Acc#{Name => [Value | Existing]}};

@@ -560,6 +560,8 @@ streaming_nullable(Config) ->
     ok = execute(Conn, <<"INSERT INTO ", Table/binary, " VALUES (10), (NULL), (30)">>),
 
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := Name, value := Value}}, Acc) ->
             Existing = maps:get(Name, Acc, []),
             {ok, Acc#{Name => [Value | Existing]}};
@@ -591,6 +593,8 @@ streaming_array(Config) ->
     ok = execute(Conn, <<"INSERT INTO ", Table/binary, " VALUES ([1, 2, 3]), ([4, 5]), ([6])">>),
 
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := Name, value := Value}}, Acc) ->
             Existing = maps:get(Name, Acc, []),
             {ok, Acc#{Name => [Value | Existing]}};
@@ -623,6 +627,8 @@ streaming_map(Config) ->
     ok = execute(Conn, <<"INSERT INTO ", Table/binary, " VALUES ({'x': 1, 'y': 2}), ({'z': 3})">>),
 
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := Name, value := Value}}, Acc) ->
             Existing = maps:get(Name, Acc, []),
             {ok, Acc#{Name => [Value | Existing]}};
@@ -666,6 +672,8 @@ streaming_mixed_complex_columns(Config) ->
     ),
 
     Callback = fun
+        (block_end, Acc) ->
+            {ok, Acc};
         ({data, #{name := Name, value := Value}}, Acc) ->
             Existing = maps:get(Name, Acc, []),
             {ok, Acc#{Name => [Value | Existing]}};

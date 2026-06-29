@@ -148,12 +148,12 @@ do_parse(Data, #{stage := num_rows, num_columns := NumColumns} = State, Acc) ->
                 0 ->
                     %% Empty block (0 columns, 0 rows) - done immediately
                     FinalRest = resolve_remainder(Rest, State),
-                    {done, lists:reverse(Acc), FinalRest};
+                    {done, lists:reverse([{data, num_rows, NumRows} | Acc]), FinalRest};
                 _ ->
                     do_parse(
                         Rest,
                         State#{stage => col_name, num_rows => NumRows, current_column => 0},
-                        Acc
+                        [{data, num_rows, NumRows} | Acc]
                     )
             end;
         {error, {truncated_data, _}} ->
